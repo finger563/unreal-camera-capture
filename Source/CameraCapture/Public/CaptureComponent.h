@@ -124,7 +124,8 @@ protected:
     // Camera / capture initialization functions
     void ConfigureCameras();
     void ConfigureDmvCamera(USceneCaptureComponent2D* camera);
-    USceneCaptureComponent2D* MakeRgbCameraFromDmvCamera(USceneCaptureComponent2D* dmvCamera);
+    void ConfigureRgbCamera(USceneCaptureComponent2D* camera);
+    USceneCaptureComponent2D* CopyAndAttachCamera(USceneCaptureComponent2D* camera, FString name_suffix);
     UTextureRenderTarget2D* MakeRenderTexture(int width, int height);
 
     // Serialization functions

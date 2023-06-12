@@ -24,15 +24,13 @@ void UCaptureComponent::BeginPlay()
 {
   Super::BeginPlay();
 
-  GetOwner()->GetComponents(DmvCameras);
+  GetOwner()->GetComponents(RgbCameras);
 
-  if (DmvCameras.Num()) {
+  if (RgbCameras.Num()) {
     ConfigureCameras();
 
     if (TimerPeriod > 0.0f) {
       UE_LOG(LogTemp, Warning, TEXT("Timer period > 0, capturing every %f seconds!"), TimerPeriod);
-      // if we have DmvCameras, start the rendering timer (if we're not
-      // capturing every frame)
       GetOwner()->GetWorldTimerManager().SetTimer(CaptureTimerHandle,
                                                   this,
                                                   &UCaptureComponent::TimerUpdateCallback,
@@ -78,12 +76,24 @@ void UCaptureComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 
 void UCaptureComponent::ConfigureCameras()
 {
-  for (auto camera : DmvCameras) {
-    UE_LOG(LogTemp, Warning, TEXT("UCaptureComponent:: Found camera %s!"), *camera->GetFName().ToString());
-    ConfigureDmvCamera(camera);
-    auto rgbCamera = MakeRgbCameraFromDmvCamera(camera);
-    // store the rgbCamera pointer
-    RgbCameras.Add(rgbCamera);
+  for (auto rgb : RgbCameras) {
+    UE_LOG(LogTemp, Warning, TEXT("UCaptureComponent:: Found camera %s!"), *rgb->GetFName().ToString());
+    // configure the rgb camera
+    ConfigureRgbCamera(rgb);
+    // make the rgb texture
+    auto rgb_rt = MakeRenderTexture(ImageWidth, ImageHeight);
+    RgbTextures.Add(rgb_rt);
+    rgb->TextureTarget = rgb_rt;
+
+    // make the dmv camera based on the rgb camera
+    auto dmv = CopyAndAttachCamera(rgb, FString("_depth_motion"));
+    ConfigureDmvCamera(dmv);
+    DmvCameras.Add(dmv);
+    // make the dmv texture
+    auto dmv_rt = MakeRenderTexture(ImageWidth, ImageHeight);
+    DmvTextures.Add(dmv_rt);
+    dmv->TextureTarget = dmv_rt;
+
   }
   // set the hidden actors for all the cameras
   SetHiddenActors(HiddenActors);
@@ -118,44 +128,45 @@ void UCaptureComponent::ConfigureDmvCamera(USceneCaptureComponent2D* camera)
   } else {
     UE_LOG(LogTemp, Error, TEXT("No DmvMaterial set!"));
   }
-
-  auto depth = MakeRenderTexture(ImageWidth, ImageHeight);
-  DmvTextures.Add(depth);
-  camera->TextureTarget = depth;
 }
 
-USceneCaptureComponent2D* UCaptureComponent::MakeRgbCameraFromDmvCamera(USceneCaptureComponent2D* camera)
+void UCaptureComponent::ConfigureRgbCamera(USceneCaptureComponent2D* camera)
 {
-  // NOTE: we don't have to do all the configuration for the camera that we did
-  // for the dmv camera (e.g. post process material) since we're just going to
-  // copy the dmv camera's config to the rgb camera's config
+  // we control the capture of the cameras, so turn off the
+  // auto-capture
+  camera->bCaptureEveryFrame = false;
+  if (!camera->bCaptureEveryFrame) {
+    // Make sure the cameras don't auto-capture on movement
+    camera->bCaptureOnMovement = false;
+    // make sure the camera rendering state is saved between frames
+    // (otherwise we get a black image)
+    camera->bAlwaysPersistRenderingState = true;
+  }
+  // where do we pull color data from? options are
+  // https://docs.unrealengine.com/en-US/API/Runtime/Engine/Engine/ESceneCaptureSource/index.html
+  camera->CaptureSource = CaptureSource;
+  // make sure there are no post process materials / effects on the
+  // rgb camera (since we're just copying the dmv camera's config)
+  camera->PostProcessSettings.WeightedBlendables.Array.Empty();
+}
 
-  // create the color camera - initialize it with the same
-  // settings as the dmv camera and attach it to the dmv camera
-  auto name = camera->GetFName().ToString() + FString("_rgb");
-  UE_LOG(LogTemp, Warning, TEXT("Making RGB camera '%s' from DMV camera."), *name);
-  auto rgbCamera = NewObject<USceneCaptureComponent2D>(this,
-                                                       USceneCaptureComponent2D::StaticClass(),
-                                                       FName(*name),
-                                                       EObjectFlags::RF_NoFlags, // flags
-                                                       camera // tmplate object for initializing
-                                                       );
+USceneCaptureComponent2D* UCaptureComponent::CopyAndAttachCamera(USceneCaptureComponent2D* camera, FString name_suffix)
+{
+  auto name = camera->GetFName().ToString() + name_suffix;
+  UE_LOG(LogTemp, Warning, TEXT("Copying camera '%s'"), *name);
+  auto copy = NewObject<USceneCaptureComponent2D>(this,
+                                                  USceneCaptureComponent2D::StaticClass(),
+                                                  FName(*name),
+                                                  EObjectFlags::RF_NoFlags, // flags
+                                                  camera // tmplate object for initializing
+                                                  );
   auto hitResult = FHitResult();
-  rgbCamera->K2_SetRelativeLocationAndRotation(FVector(0,0,0), FRotator(0,0,0), false, hitResult, true);
+  copy->K2_SetRelativeLocationAndRotation(FVector(0,0,0), FRotator(0,0,0), false, hitResult, true);
   auto rule = EAttachmentRule::KeepRelative;
   // rules: location, rotation, scale, weld bodies when attaching
   auto attachmentRules = FAttachmentTransformRules(rule, rule, rule, true);
-  rgbCamera->AttachToComponent(camera, attachmentRules);
-
-  // make sure there are no post process materials / effects on the
-  // rgb camera (since we're just copying the dmv camera's config)
-  rgbCamera->PostProcessSettings.WeightedBlendables.Array.Empty();
-
-  // make the rgb texture
-  auto rgb = MakeRenderTexture(ImageWidth, ImageHeight);
-  RgbTextures.Add(rgb);
-  rgbCamera->TextureTarget = rgb;
-  return rgbCamera;
+  copy->AttachToComponent(camera, attachmentRules);
+  return copy;
 }
 
 UTextureRenderTarget2D* UCaptureComponent::MakeRenderTexture(int width, int height)
@@ -243,10 +254,10 @@ void UCaptureComponent::SetHiddenActors(TArray<AActor*> actors)
 {
   HiddenActors = actors;
   // make sure to update the hidden actors for all the cameras
-  for (auto camera : DmvCameras) {
+  for (auto camera : RgbCameras) {
     camera->HiddenActors = HiddenActors;
   }
-  for (auto camera : RgbCameras) {
+  for (auto camera : DmvCameras) {
     camera->HiddenActors = HiddenActors;
   }
 }
@@ -270,7 +281,7 @@ void UCaptureComponent::InitOutput()
 void UCaptureComponent::WriteConfigFile()
 {
   FString configString("name,width,height,focalLength,fov,nearClipPlane,farClipPlane,tx,ty,tz,qw,qx,qy,qz\n");
-  for (auto camera : DmvCameras) {
+  for (auto camera : RgbCameras) {
     auto transform = camera->GetComponentTransform().GetRelativeTransform(GetOwner()->GetTransform());
     // for distances here we divide by 100.0 since unreal is in cm and we want to convert to m
     auto t = transform.GetTranslation() / 100.0f;
@@ -353,12 +364,12 @@ void UCaptureComponent::CaptureData()
   if (!ShouldCaptureData)
     return;
 
-  // Start deferred capture of the scene (DMV)
-  for (auto camera : DmvCameras) {
-    camera->CaptureSceneDeferred();
-  }
   // Start deferred capture of the scene (RGB)
   for (auto camera : RgbCameras) {
+    camera->CaptureSceneDeferred();
+  }
+  // Start deferred capture of the scene (DMV)
+  for (auto camera : DmvCameras) {
     camera->CaptureSceneDeferred();
   }
 
@@ -370,41 +381,37 @@ void UCaptureComponent::SaveData() {
     return;
   }
   FString suffix = "_" + FString::FromInt(ImageIndex) + ".raw";
-  for (int i=0; i<DmvCameras.Num(); i++) {
-    // get the camera (we use DmvCameras because we didn't touch their names)
-    auto camera = DmvCameras[i];
+  for (int i=0; i<RgbCameras.Num(); i++) {
+    // get the cameras and their render textures
+    auto rgb = RgbCameras[i];
+    auto dmv = DmvCameras[i];
+    auto rgb_rt = RgbTextures[i];
+    auto dmv_rt = DmvTextures[i];
 
-    // get the dmv render texture data
-    auto dmvRT = DmvTextures[i];
-    if (!dmvRT || !dmvRT->GetResource()) {
+    if (!dmv_rt || !dmv_rt->GetResource()) {
       UE_LOG(LogTemp, Error, TEXT("Bad DmvTexture || resource. Continuing"));
-      // continue, skipping this RT, we can't get its data
       continue;
     }
-    // get the rgb render texture data
-    auto rgbRT = RgbTextures[i];
-    if (!rgbRT || !rgbRT->GetResource()) {
+    if (!rgb_rt || !rgb_rt->GetResource()) {
       UE_LOG(LogTemp, Error, TEXT("Bad RgbTexture || resource. Continuing"));
-      // continue, skipping this RT, we can't get its data
       continue;
     }
 
     // copy the dmv and rgb image data from GPU to CPU
-    TArray<FLinearColor> dmvData;
-    TArray<FLinearColor> colorData;
-    dmvData.SetNum(dmvRT->SizeX * dmvRT->SizeY);
-    colorData.SetNum(rgbRT->SizeX * rgbRT->SizeY);
-    dmvRT->GameThread_GetRenderTargetResource()->ReadLinearColorPixels(dmvData);
-    rgbRT->GameThread_GetRenderTargetResource()->ReadLinearColorPixels(colorData);
+    TArray<FLinearColor> dmv_data;
+    TArray<FLinearColor> rgb_data;
+    dmv_data.SetNum(dmv_rt->SizeX * dmv_rt->SizeY);
+    rgb_data.SetNum(rgb_rt->SizeX * rgb_rt->SizeY);
+    dmv_rt->GameThread_GetRenderTargetResource()->ReadLinearColorPixels(dmv_data);
+    rgb_rt->GameThread_GetRenderTargetResource()->ReadLinearColorPixels(rgb_data);
 
     // setup the output
-    FString prefix = FPaths::Combine(*SaveLocation, *camera->GetFName().ToString());
-    FString dmvFileName = prefix + "_depth_motion" + suffix;
-    FString rgbFileName = prefix + suffix;
+    FString dmv_filename = FPaths::Combine(*SaveLocation, *dmv->GetFName().ToString() + suffix);
+    FString rgb_filename = FPaths::Combine(*SaveLocation, *rgb->GetFName().ToString() + suffix);
 
     // now spawn tasks to save the image data to files
-    RunAsyncImageSaveTask(dmvData, dmvFileName, dmvRT->SizeX, dmvRT->SizeY);
-    RunAsyncImageSaveTask(colorData, rgbFileName, dmvRT->SizeX, rgbRT->SizeY);
+    RunAsyncImageSaveTask(dmv_data, dmv_filename, dmv_rt->SizeX, dmv_rt->SizeY);
+    RunAsyncImageSaveTask(rgb_data, rgb_filename, rgb_rt->SizeX, rgb_rt->SizeY);
   }
   // now update the state variable for which image we're on
   ImageIndex++;
