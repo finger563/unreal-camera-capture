@@ -1,6 +1,6 @@
 # Camera Capture Plugin for UE 5
 
-Plugin for capturing camera (RGB + depth + motion vectors) data from multiple
+Plugin for capturing camera (GB + depth + motion vectors) data from multiple
 cameras in UE 5
 
 Provides:
@@ -25,6 +25,55 @@ See also the
 [unreal-python-tools](https://github.com/finger563/unreal-python-tools) repo for
 some example code which provides processing and display of the data produced by
 the component in this repo.
+
+## Data Collected
+
+The `CameraCapture` plugin's `CaptureComponent` creates the following data files
+within the `SaveLocation`:
+
+- `camera_config.csv`: CSV formatted data (first row is header), which as the
+  follow information:
+  - `name`: The name of the camera
+  - ``width`: The width of the image in pixels
+  - `height`: The height of the image in pixels
+  - `focalLength`: The focal length of the camera in meters
+  - `fov`: The horizontal field of view of the camera
+  - `nearClipPlane`: The near clip plane of the camera view frustum in meters
+  - `farClipPlane`: the far clip plane of the camera view frustum in meters (may be `inf`)
+  - `tx`: The relative position of the camera w.r.t. the actor position, x-axis
+  - `ty`: The relative position of the camera w.r.t. the actor position, y-axis
+  - `tz`: The relative position of the camera w.r.t. the actor position, z-axis
+  - `qw`: The relative orientation of the camera w.r.t. the actor orientation, w-component
+  - `qx`: The relative orientation of the camera w.r.t. the actor orientation, x-component
+  - `qy`: The relative orientation of the camera w.r.t. the actor orientation, y-component
+  - `qz`: The relative orientation of the camera w.r.t. the actor orientation, z-component
+- `transformations.csv`: CSV formatted data (first row is header), which has the
+  following information:
+  - `i`: frame index
+  - `time`: time since the start of the program at which data
+    (frames/transforms) were captured
+  - `tx`: actor world position along the world x-axis
+  - `ty`: actor world position along the world y-axis
+  - `tz`: actor world position along the world z-axis
+  - `qw`: actor world orientation as a quaternion, w-component
+  - `qx`: actor world orientation as a quaternion, x-component
+  - `qy`: actor world orientation as a quaternion, y-component
+  - `qz`: actor world orientation as a quaternion, z-component
+- `<camera name>_<index>.raw`: Uncompressed 4-channel, 32bit float formatted
+  (32bit float per channel) color image data for `<camera_name>` at 0-indexed
+  `<index>`. The mapping from `<index>` to time can be found in the
+  `transformations.csv` file.
+- `<camera name>_depth_motion_<index>.raw`: Uncompressed 4-channel 32bit float
+  formatted (32bit float per channel) depth (red channel) + motion vector data
+  (pixel x-y motion frame to frame in the green and blue channels) for `<camera
+  name>` at 0-indexed `<index>`. The mapping from `<index>` to time can be found
+  in the `transformations.csv` file.
+
+The output data in this folder can be visualized using the [display_raw python
+script](https://github.com/finger563/unreal-python-tools/blob/main/display_raw.py).
+An example visualization can be found below:
+
+
 
 ## References
 
