@@ -73,7 +73,7 @@ The output data in this folder can be visualized using the [display_raw python
 script](https://github.com/finger563/unreal-python-tools/blob/main/display_raw.py).
 An example visualization can be found below:
 
-
+![example](https://github.com/finger563/unreal-camera-capture/assets/213467/dc91ba5a-21bc-47c5-92cd-5b09414c6420)
 
 ## References
 
