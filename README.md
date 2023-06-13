@@ -34,7 +34,7 @@ within the `SaveLocation`:
 - `camera_config.csv`: CSV formatted data (first row is header), which as the
   follow information:
   - `name`: The name of the camera
-  - ``width`: The width of the image in pixels
+  - `width`: The width of the image in pixels
   - `height`: The height of the image in pixels
   - `focalLength`: The focal length of the camera in meters
   - `fov`: The horizontal field of view of the camera
