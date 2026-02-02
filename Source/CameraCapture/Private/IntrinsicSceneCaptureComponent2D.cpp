@@ -1,17 +1,17 @@
-#include "RammsSceneCaptureComponent2D.h"
+#include "IntrinsicSceneCaptureComponent2D.h"
 
-URammsSceneCaptureComponent2D::URammsSceneCaptureComponent2D()
+UIntrinsicSceneCaptureComponent2D::UIntrinsicSceneCaptureComponent2D()
 {
 	PrimaryComponentTick.bCanEverTick = false;
 	
 	// We control capture timing via CaptureComponent, so disable auto-capture
 	bCaptureEveryFrame = false;
 	bCaptureOnMovement = false;
-    // but we want to ensure that motion vectors and such are still good so turn on persist rendering state
-    bAlwaysPersistRenderingState = true;
+	// but we want to ensure that motion vectors and such are still good so turn on persist rendering state
+	bAlwaysPersistRenderingState = true;
 }
 
-void URammsSceneCaptureComponent2D::BeginPlay()
+void UIntrinsicSceneCaptureComponent2D::BeginPlay()
 {
 	Super::BeginPlay();
 
@@ -22,18 +22,20 @@ void URammsSceneCaptureComponent2D::BeginPlay()
 }
 
 #if WITH_EDITOR
-void URammsSceneCaptureComponent2D::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+void UIntrinsicSceneCaptureComponent2D::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 
-	// Apply intrinsics when properties change in editor
-	if (bUseCustomIntrinsics && PropertyChangedEvent.Property != nullptr)
+	// Apply or clear intrinsics whenever relevant properties change
+	if (PropertyChangedEvent.MemberProperty != nullptr)
 	{
-		FName PropertyName = PropertyChangedEvent.Property->GetFName();
-		if (PropertyName == GET_MEMBER_NAME_CHECKED(URammsSceneCaptureComponent2D, bUseCustomIntrinsics) ||
-			PropertyName == GET_MEMBER_NAME_CHECKED(URammsSceneCaptureComponent2D, bUseIntrinsicsAsset) ||
-			PropertyName == GET_MEMBER_NAME_CHECKED(URammsSceneCaptureComponent2D, IntrinsicsAsset) ||
-			PropertyName == GET_MEMBER_NAME_CHECKED(URammsSceneCaptureComponent2D, InlineIntrinsics))
+		FName MemberPropertyName = PropertyChangedEvent.MemberProperty->GetFName();
+		
+		// Check if any intrinsics-related property changed
+		if (MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, bUseCustomIntrinsics) ||
+			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, bUseIntrinsicsAsset) ||
+			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, IntrinsicsAsset) ||
+			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, InlineIntrinsics))
 		{
 			ApplyIntrinsics();
 		}
@@ -41,7 +43,7 @@ void URammsSceneCaptureComponent2D::PostEditChangeProperty(FPropertyChangedEvent
 }
 #endif
 
-FRammsCameraIntrinsics URammsSceneCaptureComponent2D::GetActiveIntrinsics() const
+FCameraIntrinsics UIntrinsicSceneCaptureComponent2D::GetActiveIntrinsics() const
 {
 	if (bUseIntrinsicsAsset && IntrinsicsAsset)
 	{
@@ -50,15 +52,25 @@ FRammsCameraIntrinsics URammsSceneCaptureComponent2D::GetActiveIntrinsics() cons
 	return InlineIntrinsics;
 }
 
-void URammsSceneCaptureComponent2D::ApplyIntrinsics()
+void UIntrinsicSceneCaptureComponent2D::ApplyIntrinsics()
 {
 	if (!bUseCustomIntrinsics)
 	{
+		// Clear custom projection matrix when disabled
 		bUseCustomProjectionMatrix = false;
 		return;
 	}
 
-	FRammsCameraIntrinsics Intrinsics = GetActiveIntrinsics();
+	FCameraIntrinsics Intrinsics = GetActiveIntrinsics();
+
+	// Validate intrinsics to prevent divide-by-zero
+	if (Intrinsics.ImageWidth < 1 || Intrinsics.ImageHeight < 1)
+	{
+		UE_LOG(LogTemp, Error, TEXT("IntrinsicSceneCaptureComponent2D [%s]: Invalid image dimensions (%dx%d). Intrinsics not applied."),
+			*GetName(), Intrinsics.ImageWidth, Intrinsics.ImageHeight);
+		bUseCustomProjectionMatrix = false;
+		return;
+	}
 
 	if (Intrinsics.bMaintainYAxis)
 	{
@@ -94,8 +106,16 @@ void URammsSceneCaptureComponent2D::ApplyIntrinsics()
 	}
 }
 
-FMatrix URammsSceneCaptureComponent2D::BuildProjectionMatrixFromIntrinsics(const FRammsCameraIntrinsics& Intrinsics)
+FMatrix UIntrinsicSceneCaptureComponent2D::BuildProjectionMatrixFromIntrinsics(const FCameraIntrinsics& Intrinsics)
 {
+	// Validate dimensions to prevent divide-by-zero
+	if (Intrinsics.ImageWidth < 1 || Intrinsics.ImageHeight < 1)
+	{
+		UE_LOG(LogTemp, Error, TEXT("BuildProjectionMatrixFromIntrinsics: Invalid dimensions (%dx%d), returning identity matrix"),
+			Intrinsics.ImageWidth, Intrinsics.ImageHeight);
+		return FMatrix::Identity;
+	}
+
 	float Width = static_cast<float>(Intrinsics.ImageWidth);
 	float Height = static_cast<float>(Intrinsics.ImageHeight);
 	
@@ -105,9 +125,9 @@ FMatrix URammsSceneCaptureComponent2D::BuildProjectionMatrixFromIntrinsics(const
 	float cx = (Intrinsics.PrincipalPointX - Width * 0.5f) / Width;
 	float cy = (Intrinsics.PrincipalPointY - Height * 0.5f) / Height;
 	
-	// Use reasonable near/far clip planes
-	float NearClip = 10.0f; // 10cm in UE units
-	float FarClip = 1000000.0f; // 10km in UE units
+	// Use GNearClippingPlane for consistency with config export
+	// Note: Using infinite far plane (reversed-Z projection)
+	float NearClip = GNearClippingPlane;
 	
 	// Build custom projection matrix from camera intrinsics
 	FMatrix ProjectionMatrix = FMatrix::Identity;
@@ -118,7 +138,7 @@ FMatrix URammsSceneCaptureComponent2D::BuildProjectionMatrixFromIntrinsics(const
 	ProjectionMatrix.M[2][0] = 2.0f * cx;
 	ProjectionMatrix.M[2][1] = -2.0f * cy; // Flip Y for UE coordinate system
 	
-	// Standard perspective projection depth terms (reversed-Z)
+	// Standard perspective projection depth terms (reversed-Z with infinite far plane)
 	ProjectionMatrix.M[2][2] = 0.0f;
 	ProjectionMatrix.M[2][3] = 1.0f;
 	ProjectionMatrix.M[3][2] = NearClip;

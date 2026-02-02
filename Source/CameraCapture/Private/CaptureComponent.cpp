@@ -3,7 +3,7 @@
 #include "CaptureComponent.h"
 
 #include "Components/SceneCaptureComponent2D.h"
-#include "RammsSceneCaptureComponent2D.h"
+#include "IntrinsicSceneCaptureComponent2D.h"
 #include "Engine.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Kismet/GameplayStatics.h"
@@ -25,19 +25,19 @@ void UCaptureComponent::BeginPlay()
 {
   Super::BeginPlay();
 
-  // Only find URammsSceneCaptureComponent2D cameras (not base USceneCaptureComponent2D)
+  // Only find UIntrinsicSceneCaptureComponent2D cameras (not base USceneCaptureComponent2D)
   // This allows us to have per-camera intrinsics and only capture from marked cameras
-  TArray<URammsSceneCaptureComponent2D*> RammsCameras;
-  GetOwner()->GetComponents(RammsCameras);
+  TArray<UIntrinsicSceneCaptureComponent2D*> IntrinsicCameras;
+  GetOwner()->GetComponents(IntrinsicCameras);
   
   // Cast to base type for existing code compatibility
-  for (auto* RammsCamera : RammsCameras)
+  for (auto* IntrinsicCamera : IntrinsicCameras)
   {
-    RgbCameras.Add(RammsCamera);
+    RgbCameras.Add(IntrinsicCamera);
   }
 
   if (RgbCameras.Num()) {
-    UE_LOG(LogTemp, Log, TEXT("UCaptureComponent:: Found %d URammsSceneCaptureComponent2D cameras"), RgbCameras.Num());
+    UE_LOG(LogTemp, Log, TEXT("UCaptureComponent:: Found %d UIntrinsicSceneCaptureComponent2D cameras"), RgbCameras.Num());
     ConfigureCameras();
 
     if (TimerPeriod > 0.0f) {
@@ -53,8 +53,8 @@ void UCaptureComponent::BeginPlay()
     }
   }
   else {
-    UE_LOG(LogTemp, Warning, TEXT("UCaptureComponent:: Could not find any URammsSceneCaptureComponent2D components on this actor!"));
-    UE_LOG(LogTemp, Warning, TEXT("UCaptureComponent:: Make sure to use URammsSceneCaptureComponent2D instead of base USceneCaptureComponent2D"));
+    UE_LOG(LogTemp, Warning, TEXT("UCaptureComponent:: Could not find any UIntrinsicSceneCaptureComponent2D components on this actor!"));
+    UE_LOG(LogTemp, Warning, TEXT("UCaptureComponent:: Make sure to use UIntrinsicSceneCaptureComponent2D instead of base USceneCaptureComponent2D"));
   }
 }
 
@@ -92,20 +92,20 @@ void UCaptureComponent::ConfigureCameras()
     UE_LOG(LogTemp, Log, TEXT("UCaptureComponent:: Found camera %s!"), *rgb->GetFName().ToString());
     
     // Get image dimensions from camera intrinsics
-    URammsSceneCaptureComponent2D* RammsCamera = Cast<URammsSceneCaptureComponent2D>(rgb);
+    UIntrinsicSceneCaptureComponent2D* IntrinsicCamera = Cast<UIntrinsicSceneCaptureComponent2D>(rgb);
     int32 ImageWidth = 640;
     int32 ImageHeight = 480;
     
-    if (RammsCamera)
+    if (IntrinsicCamera)
     {
-      FRammsCameraIntrinsics Intrinsics = RammsCamera->GetActiveIntrinsics();
+      FCameraIntrinsics Intrinsics = IntrinsicCamera->GetActiveIntrinsics();
       ImageWidth = Intrinsics.ImageWidth;
       ImageHeight = Intrinsics.ImageHeight;
       UE_LOG(LogTemp, Log, TEXT("  Using resolution %dx%d from camera intrinsics"), ImageWidth, ImageHeight);
     }
     else
     {
-      UE_LOG(LogTemp, Warning, TEXT("  Camera is not URammsSceneCaptureComponent2D, using default 640x480"));
+      UE_LOG(LogTemp, Warning, TEXT("  Camera is not UIntrinsicSceneCaptureComponent2D, using default 640x480"));
     }
     
     // configure the rgb camera
@@ -324,15 +324,39 @@ void UCaptureComponent::WriteConfigFile()
     int32 ImageWidth = 640;
     int32 ImageHeight = 480;
     float focalLength = 0.0f;
+    float fov = 0.0f;
     
-    URammsSceneCaptureComponent2D* RammsCamera = Cast<URammsSceneCaptureComponent2D>(camera);
-    if (RammsCamera)
+    UIntrinsicSceneCaptureComponent2D* IntrinsicCamera = Cast<UIntrinsicSceneCaptureComponent2D>(camera);
+    if (IntrinsicCamera && IntrinsicCamera->bUseCustomIntrinsics)
     {
-      FRammsCameraIntrinsics Intrinsics = RammsCamera->GetActiveIntrinsics();
+      FCameraIntrinsics Intrinsics = IntrinsicCamera->GetActiveIntrinsics();
       ImageWidth = Intrinsics.ImageWidth;
       ImageHeight = Intrinsics.ImageHeight;
       // Average focal length for config file
       focalLength = (Intrinsics.FocalLengthX + Intrinsics.FocalLengthY) / 2.0f;
+      
+      // When using custom projection matrix, compute effective horizontal FOV from intrinsics
+      // FOV = 2 * atan(width / (2 * fx))
+      if (IntrinsicCamera->bUseCustomProjectionMatrix && !Intrinsics.bMaintainYAxis)
+      {
+        float fx = Intrinsics.FocalLengthX; // in pixels
+        if (FMath::Abs(fx) > KINDA_SMALL_NUMBER) {
+          fov = 2.0f * FMath::RadiansToDegrees(FMath::Atan(ImageWidth / (2.0f * fx)));
+        } else {
+          UE_LOG(LogTemp, Warning, TEXT("Invalid focal length X (%f) for camera %s; falling back to FOVAngle."), fx, *camera->GetName());
+          fov = camera->FOVAngle;
+        }
+      }
+      else
+      {
+        // Using FOV-based or Maintain Y-Axis mode - use camera's FOV
+        fov = camera->FOVAngle;
+      }
+    }
+    else
+    {
+      // Not an intrinsic camera or not using custom intrinsics - use default FOV
+      fov = camera->FOVAngle;
     }
     
     // Note: all cameras share the same frustum configuration (near/far planes)
@@ -345,7 +369,7 @@ void UCaptureComponent::WriteConfigFile()
                                            *camera->GetFName().ToString(),
                                            ImageWidth, ImageHeight,
                                            focalLength,
-                                           camera->FOVAngle,
+                                           fov,
                                            nearPlane, farPlane,
                                            t.X, t.Y, t.Z,
                                            q.W, q.X, q.Y, q.Z
