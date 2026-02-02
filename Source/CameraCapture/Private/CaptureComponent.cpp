@@ -3,6 +3,7 @@
 #include "CaptureComponent.h"
 
 #include "Components/SceneCaptureComponent2D.h"
+#include "RammsSceneCaptureComponent2D.h"
 #include "Engine.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Kismet/GameplayStatics.h"
@@ -24,13 +25,23 @@ void UCaptureComponent::BeginPlay()
 {
   Super::BeginPlay();
 
-  GetOwner()->GetComponents(RgbCameras);
+  // Only find URammsSceneCaptureComponent2D cameras (not base USceneCaptureComponent2D)
+  // This allows us to have per-camera intrinsics and only capture from marked cameras
+  TArray<URammsSceneCaptureComponent2D*> RammsCameras;
+  GetOwner()->GetComponents(RammsCameras);
+  
+  // Cast to base type for existing code compatibility
+  for (auto* RammsCamera : RammsCameras)
+  {
+    RgbCameras.Add(RammsCamera);
+  }
 
   if (RgbCameras.Num()) {
+    UE_LOG(LogTemp, Log, TEXT("UCaptureComponent:: Found %d URammsSceneCaptureComponent2D cameras"), RgbCameras.Num());
     ConfigureCameras();
 
     if (TimerPeriod > 0.0f) {
-      UE_LOG(LogTemp, Warning, TEXT("Timer period > 0, capturing every %f seconds!"), TimerPeriod);
+      UE_LOG(LogTemp, Log, TEXT("Timer period > 0, capturing every %f seconds!"), TimerPeriod);
       GetOwner()->GetWorldTimerManager().SetTimer(CaptureTimerHandle,
                                                   this,
                                                   &UCaptureComponent::TimerUpdateCallback,
@@ -42,7 +53,8 @@ void UCaptureComponent::BeginPlay()
     }
   }
   else {
-    UE_LOG(LogTemp, Warning, TEXT("UCaptureComponent:: Could not find any camera components on this actor!"));
+    UE_LOG(LogTemp, Warning, TEXT("UCaptureComponent:: Could not find any URammsSceneCaptureComponent2D components on this actor!"));
+    UE_LOG(LogTemp, Warning, TEXT("UCaptureComponent:: Make sure to use URammsSceneCaptureComponent2D instead of base USceneCaptureComponent2D"));
   }
 }
 
@@ -77,7 +89,25 @@ void UCaptureComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 void UCaptureComponent::ConfigureCameras()
 {
   for (auto rgb : RgbCameras) {
-    UE_LOG(LogTemp, Warning, TEXT("UCaptureComponent:: Found camera %s!"), *rgb->GetFName().ToString());
+    UE_LOG(LogTemp, Log, TEXT("UCaptureComponent:: Found camera %s!"), *rgb->GetFName().ToString());
+    
+    // Get image dimensions from camera intrinsics
+    URammsSceneCaptureComponent2D* RammsCamera = Cast<URammsSceneCaptureComponent2D>(rgb);
+    int32 ImageWidth = 640;
+    int32 ImageHeight = 480;
+    
+    if (RammsCamera)
+    {
+      FRammsCameraIntrinsics Intrinsics = RammsCamera->GetActiveIntrinsics();
+      ImageWidth = Intrinsics.ImageWidth;
+      ImageHeight = Intrinsics.ImageHeight;
+      UE_LOG(LogTemp, Log, TEXT("  Using resolution %dx%d from camera intrinsics"), ImageWidth, ImageHeight);
+    }
+    else
+    {
+      UE_LOG(LogTemp, Warning, TEXT("  Camera is not URammsSceneCaptureComponent2D, using default 640x480"));
+    }
+    
     // configure the rgb camera
     ConfigureRgbCamera(rgb);
     // make the rgb texture
@@ -148,12 +178,15 @@ void UCaptureComponent::ConfigureRgbCamera(USceneCaptureComponent2D* camera)
   // make sure there are no post process materials / effects on the
   // rgb camera (since we're just copying the dmv camera's config)
   camera->PostProcessSettings.WeightedBlendables.Array.Empty();
+  
+  // Camera intrinsics are now handled by URammsSceneCaptureComponent2D itself
+  // They are applied in BeginPlay and when properties change in editor
 }
 
 USceneCaptureComponent2D* UCaptureComponent::CopyAndAttachCamera(USceneCaptureComponent2D* camera, FString name_suffix)
 {
   auto name = camera->GetFName().ToString() + name_suffix;
-  UE_LOG(LogTemp, Warning, TEXT("Copying camera '%s'"), *name);
+  UE_LOG(LogTemp, Log, TEXT("Copying camera '%s'"), *name);
   auto copy = NewObject<USceneCaptureComponent2D>(this,
                                                   USceneCaptureComponent2D::StaticClass(),
                                                   FName(*name),
@@ -286,7 +319,22 @@ void UCaptureComponent::WriteConfigFile()
     // for distances here we divide by 100.0 since unreal is in cm and we want to convert to m
     auto t = transform.GetTranslation() / 100.0f;
     auto q = transform.GetRotation();
-    float focalLength = 0.0f; // TODO: we cannot get focal length here!
+    
+    // Get image dimensions and focal length from camera intrinsics
+    int32 ImageWidth = 640;
+    int32 ImageHeight = 480;
+    float focalLength = 0.0f;
+    
+    URammsSceneCaptureComponent2D* RammsCamera = Cast<URammsSceneCaptureComponent2D>(camera);
+    if (RammsCamera)
+    {
+      FRammsCameraIntrinsics Intrinsics = RammsCamera->GetActiveIntrinsics();
+      ImageWidth = Intrinsics.ImageWidth;
+      ImageHeight = Intrinsics.ImageHeight;
+      // Average focal length for config file
+      focalLength = (Intrinsics.FocalLengthX + Intrinsics.FocalLengthY) / 2.0f;
+    }
+    
     // Note: all cameras share the same frustum configuration (near/far planes)
     float nearPlane = GNearClippingPlane / 100.0f;
     // there is no far clip plane in UE4, according to
