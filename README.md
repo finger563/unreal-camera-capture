@@ -5,19 +5,20 @@ cameras in UE 5
 
 Provides:
 - An actor component `CaptureComponent` which can be added to any actor. It will
-  automatically find all `UIntrinsicSceneCaptureComponent2D` components that are attached to the
-  parent actor. For each camera it finds, it will configure that camera to
-  output depth and motion vectors (by applying the `M_DmvCapture` post process
-  material to it) and will configure it to output to a render texture. It will
-  then create a copy of each camera which will render the color data to a
-  texture as well. These textures can be captured (for other uses in the
+  automatically find all `UIntrinsicSceneCaptureComponent2D` components that are
+  attached to the parent actor. For each camera it finds, it will configure that
+  camera to output depth and motion vectors (by applying the `M_DmvCapture` post
+  process material to it) and will configure it to output to a render texture.
+  It will then create a copy of each camera which will render the color data to
+  a texture as well. These textures can be captured (for other uses in the
   engine), and optionally serialized / saved to disk. The component can be
   configured to capture every frame of the camera or to capture frames at a
   specific interval of time.
-- `UIntrinsicSceneCaptureComponent2D` - A subclass of `USceneCaptureComponent2D` that
-  supports custom camera intrinsics for precise camera calibration. Each camera
-  can have different intrinsics defined either inline or via reusable data assets.
-- `FRammsCameraIntrinsics` - Data asset for storing camera intrinsic parameters
+- `UIntrinsicSceneCaptureComponent2D` - A subclass of `USceneCaptureComponent2D`
+  that supports custom camera intrinsics for precise camera calibration. Each
+  camera can have different intrinsics defined either inline or via reusable
+  data assets.
+- `FCameraIntrinsics` - Data asset for storing camera intrinsic parameters
   (focal length, principal point, image dimensions) that can be shared across
   multiple cameras (e.g., "RealSense D435" preset).
 - A `M_DmvCapture` material for saving depth + motion vectors to a single

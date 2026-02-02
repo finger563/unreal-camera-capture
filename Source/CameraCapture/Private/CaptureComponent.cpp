@@ -340,7 +340,12 @@ void UCaptureComponent::WriteConfigFile()
       if (IntrinsicCamera->bUseCustomProjectionMatrix && !Intrinsics.bMaintainYAxis)
       {
         float fx = Intrinsics.FocalLengthX; // in pixels
-        fov = 2.0f * FMath::RadiansToDegrees(FMath::Atan(ImageWidth / (2.0f * fx)));
+        if (FMath::Abs(fx) > KINDA_SMALL_NUMBER) {
+          fov = 2.0f * FMath::RadiansToDegrees(FMath::Atan(ImageWidth / (2.0f * fx)));
+        } else {
+          UE_LOG(LogTemp, Warning, TEXT("Invalid focal length X (%f) for camera %s; falling back to FOVAngle."), fx, *camera->GetName());
+          fov = camera->FOVAngle;
+        }
       }
       else
       {
