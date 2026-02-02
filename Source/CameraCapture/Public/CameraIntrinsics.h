@@ -2,14 +2,14 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
-#include "RammsCameraIntrinsics.generated.h"
+#include "CameraIntrinsics.generated.h"
 
 /**
  * Camera intrinsic parameters for precise camera calibration
  * Can be used as inline parameters or saved as reusable data assets
  */
 USTRUCT(BlueprintType)
-struct CAMERACAPTURE_API FRammsCameraIntrinsics
+struct CAMERACAPTURE_API FCameraIntrinsics
 {
 	GENERATED_BODY()
 
@@ -30,11 +30,11 @@ struct CAMERACAPTURE_API FRammsCameraIntrinsics
 	float PrincipalPointY = 240.0f;
 
 	/** Image width in pixels */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera Intrinsics")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera Intrinsics", meta = (ClampMin = "1"))
 	int32 ImageWidth = 640;
 
 	/** Image height in pixels */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera Intrinsics")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera Intrinsics", meta = (ClampMin = "1"))
 	int32 ImageHeight = 480;
 
 	/** Whether to use Maintain Y-Axis FOV calculation instead of custom projection matrix */
@@ -45,7 +45,7 @@ struct CAMERACAPTURE_API FRammsCameraIntrinsics
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera Intrinsics")
 	FString PresetName = TEXT("Custom");
 
-	FRammsCameraIntrinsics() = default;
+	FCameraIntrinsics() = default;
 };
 
 /**
@@ -53,11 +53,11 @@ struct CAMERACAPTURE_API FRammsCameraIntrinsics
  * Create these as assets for specific camera models (e.g., RealSense D435)
  */
 UCLASS(BlueprintType, Blueprintable)
-class CAMERACAPTURE_API URammsCameraIntrinsicsAsset : public UDataAsset
+class CAMERACAPTURE_API UCameraIntrinsicsAsset : public UDataAsset
 {
 	GENERATED_BODY()
 
 public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera Intrinsics")
-	FRammsCameraIntrinsics Intrinsics;
+	FCameraIntrinsics Intrinsics;
 };

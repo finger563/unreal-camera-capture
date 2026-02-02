@@ -5,7 +5,7 @@ cameras in UE 5
 
 Provides:
 - An actor component `CaptureComponent` which can be added to any actor. It will
-  automatically find all `URammsSceneCaptureComponent2D` components that are attached to the
+  automatically find all `UIntrinsicSceneCaptureComponent2D` components that are attached to the
   parent actor. For each camera it finds, it will configure that camera to
   output depth and motion vectors (by applying the `M_DmvCapture` post process
   material to it) and will configure it to output to a render texture. It will
@@ -14,7 +14,7 @@ Provides:
   engine), and optionally serialized / saved to disk. The component can be
   configured to capture every frame of the camera or to capture frames at a
   specific interval of time.
-- `URammsSceneCaptureComponent2D` - A subclass of `USceneCaptureComponent2D` that
+- `UIntrinsicSceneCaptureComponent2D` - A subclass of `USceneCaptureComponent2D` that
   supports custom camera intrinsics for precise camera calibration. Each camera
   can have different intrinsics defined either inline or via reusable data assets.
 - `FRammsCameraIntrinsics` - Data asset for storing camera intrinsic parameters
@@ -25,12 +25,12 @@ Provides:
 
 ## Usage
 
-1. **Add cameras to your actor**: Attach `URammsSceneCaptureComponent2D` components
+1. **Add cameras to your actor**: Attach `UIntrinsicSceneCaptureComponent2D` components
    to your actor (not the base `USceneCaptureComponent2D`).
 
 2. **Configure camera intrinsics** (optional):
    - **Option A - Create reusable preset**: Right-click in Content Browser → 
-     Miscellaneous → Data Asset → Select `RammsCameraIntrinsicsAsset`. Configure
+     Miscellaneous → Data Asset → Select `CameraIntrinsicsAsset`. Configure
      the intrinsics and save (e.g., "DA_RealSense_D435").
    - **Option B - Inline configuration**: Set intrinsics directly on each camera
      component.
@@ -38,7 +38,7 @@ Provides:
      `bUseIntrinsicsAsset` or inline parameters.
 
 3. **Add CaptureComponent**: Add the `CaptureComponent` to your actor. It will
-   automatically find and configure all `URammsSceneCaptureComponent2D` cameras.
+   automatically find and configure all `UIntrinsicSceneCaptureComponent2D` cameras.
 
 4. **Configure capture settings**: Set `TimerPeriod`, `SaveLocation`, and other
    options on the `CaptureComponent`.

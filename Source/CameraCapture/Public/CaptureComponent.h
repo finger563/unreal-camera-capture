@@ -8,7 +8,7 @@
 #include "CaptureComponent.generated.h"
 
 class USceneCaptureComponent2D;
-class URammsSceneCaptureComponent2D;
+class UIntrinsicSceneCaptureComponent2D;
 class UTextureRenderTarget2D;
 class UMaterialInterface;
 
