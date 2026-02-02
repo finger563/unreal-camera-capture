@@ -8,6 +8,7 @@
 #include "CaptureComponent.generated.h"
 
 class USceneCaptureComponent2D;
+class URammsSceneCaptureComponent2D;
 class UTextureRenderTarget2D;
 class UMaterialInterface;
 
@@ -86,15 +87,6 @@ public:
     // Toggle whether the component should be serializing or not. Returns the new state (true = saving)
     UFUNCTION(BlueprintCallable, Category = "Serialization")
     bool ToggleSavingData();
-
-    // What source do we use for RGB SceneCaptureComponent2D data?
-    // Width of the output images
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Serialization")
-    int ImageWidth = 672;
-
-    // Height of the output images
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Serialization")
-    int ImageHeight = 384;
 
     // Location (folder) where we should save the data. Default (empty) will
     // create a "camera_data" folder in the project root directory.

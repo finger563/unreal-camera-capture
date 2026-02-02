@@ -1,11 +1,11 @@
 # Camera Capture Plugin for UE 5
 
-Plugin for capturing camera (GB + depth + motion vectors) data from multiple
+Plugin for capturing camera (RGB + depth + motion vectors) data from multiple
 cameras in UE 5
 
 Provides:
 - An actor component `CaptureComponent` which can be added to any actor. It will
-  automatically find all `SceneCapture2D` components that are attached to the
+  automatically find all `URammsSceneCaptureComponent2D` components that are attached to the
   parent actor. For each camera it finds, it will configure that camera to
   output depth and motion vectors (by applying the `M_DmvCapture` post process
   material to it) and will configure it to output to a render texture. It will
@@ -14,8 +14,52 @@ Provides:
   engine), and optionally serialized / saved to disk. The component can be
   configured to capture every frame of the camera or to capture frames at a
   specific interval of time.
+- `URammsSceneCaptureComponent2D` - A subclass of `USceneCaptureComponent2D` that
+  supports custom camera intrinsics for precise camera calibration. Each camera
+  can have different intrinsics defined either inline or via reusable data assets.
+- `FRammsCameraIntrinsics` - Data asset for storing camera intrinsic parameters
+  (focal length, principal point, image dimensions) that can be shared across
+  multiple cameras (e.g., "RealSense D435" preset).
 - A `M_DmvCapture` material for saving depth + motion vectors to a single
   texture (used by `CaptureComponent`)
+
+## Usage
+
+1. **Add cameras to your actor**: Attach `URammsSceneCaptureComponent2D` components
+   to your actor (not the base `USceneCaptureComponent2D`).
+
+2. **Configure camera intrinsics** (optional):
+   - **Option A - Create reusable preset**: Right-click in Content Browser → 
+     Miscellaneous → Data Asset → Select `RammsCameraIntrinsicsAsset`. Configure
+     the intrinsics and save (e.g., "DA_RealSense_D435").
+   - **Option B - Inline configuration**: Set intrinsics directly on each camera
+     component.
+   - On the camera component, enable `bUseCustomIntrinsics`, choose between
+     `bUseIntrinsicsAsset` or inline parameters.
+
+3. **Add CaptureComponent**: Add the `CaptureComponent` to your actor. It will
+   automatically find and configure all `URammsSceneCaptureComponent2D` cameras.
+
+4. **Configure capture settings**: Set `TimerPeriod`, `SaveLocation`, and other
+   options on the `CaptureComponent`.
+
+**Note**: Each camera now defines its own image resolution through its intrinsics
+settings. The previous global `ImageWidth`/`ImageHeight` parameters have been
+removed.
+
+## Camera Intrinsics
+
+The plugin supports two modes for camera projection:
+
+1. **Custom Intrinsics Mode** (`bUseCustomIntrinsics = true`):
+   - Builds a custom projection matrix from pixel-based camera parameters
+   - Parameters: `FocalLengthX`, `FocalLengthY`, `PrincipalPointX`, `PrincipalPointY`
+   - Use this to precisely match real-world camera sensors
+
+2. **Maintain Y-Axis Mode** (`bMaintainYAxis = true`):
+   - Adjusts horizontal FOV to maintain vertical FOV as aspect ratio changes
+   - Matches gameplay camera behavior
+   - Use this for consistent framing across different resolutions
 
 See the
 [unreal-camera-capture-example](https://github.com/finger563/unreal-camera-capture-example)
