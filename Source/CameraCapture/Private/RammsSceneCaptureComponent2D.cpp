@@ -7,6 +7,8 @@ URammsSceneCaptureComponent2D::URammsSceneCaptureComponent2D()
 	// We control capture timing via CaptureComponent, so disable auto-capture
 	bCaptureEveryFrame = false;
 	bCaptureOnMovement = false;
+    // but we want to ensure that motion vectors and such are still good so turn on persist rendering state
+    bAlwaysPersistRenderingState = true;
 }
 
 void URammsSceneCaptureComponent2D::BeginPlay()
