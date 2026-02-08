@@ -44,10 +44,31 @@ public:
 	/** Build a custom projection matrix from camera intrinsics (C++ only) */
 	static FMatrix BuildProjectionMatrixFromIntrinsics(const FCameraIntrinsics& Intrinsics);
 
+	/** Whether to draw the camera frustum for visualization */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (DisplayName = "Draw Frustum", ToolTip = "Enable to visualize the camera's field of view frustum"))
+	bool bDrawFrustum = false;
+
+	/** Distance to draw the far plane of the frustum (in cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (EditCondition = "bDrawFrustum", ClampMin = "10.0", DisplayName = "Frustum Draw Distance", ToolTip = "Distance to the far plane of the visualized frustum (in cm)"))
+	float FrustumDrawDistance = 500.0f;
+
+	/** Color of the frustum lines */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (EditCondition = "bDrawFrustum", DisplayName = "Frustum Color", ToolTip = "Color of the frustum visualization lines"))
+	FColor FrustumColor = FColor::Yellow;
+
+	/** Thickness of frustum lines */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (EditCondition = "bDrawFrustum", ClampMin = "0.0", DisplayName = "Frustum Line Thickness", ToolTip = "Thickness of the frustum visualization lines"))
+	float FrustumLineThickness = 2.0f;
+
 protected:
 	virtual void BeginPlay() override;
+	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
+
+	/** Draw the camera frustum for visualization */
+	void DrawCameraFrustum();
 
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	virtual void OnRegister() override;
 #endif
 };

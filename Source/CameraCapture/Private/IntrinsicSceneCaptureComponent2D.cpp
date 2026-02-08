@@ -1,8 +1,15 @@
 #include "IntrinsicSceneCaptureComponent2D.h"
+#include "DrawDebugHelpers.h"
 
 UIntrinsicSceneCaptureComponent2D::UIntrinsicSceneCaptureComponent2D()
 {
-	PrimaryComponentTick.bCanEverTick = false;
+	PrimaryComponentTick.bCanEverTick = true;
+	PrimaryComponentTick.TickGroup = TG_DuringPhysics;
+	
+#if WITH_EDITORONLY_DATA
+	// Enable ticking in editor for frustum visualization
+	bTickInEditor = true;
+#endif
 	
 	// We control capture timing via CaptureComponent, so disable auto-capture
 	bCaptureEveryFrame = false;
@@ -18,6 +25,17 @@ void UIntrinsicSceneCaptureComponent2D::BeginPlay()
 	if (bUseCustomIntrinsics)
 	{
 		ApplyIntrinsics();
+	}
+}
+
+void UIntrinsicSceneCaptureComponent2D::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
+{
+	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+
+	// Draw frustum if enabled (works in both editor and runtime)
+	if (bDrawFrustum)
+	{
+		DrawCameraFrustum();
 	}
 }
 
@@ -39,6 +57,34 @@ void UIntrinsicSceneCaptureComponent2D::PostEditChangeProperty(FPropertyChangedE
 		{
 			ApplyIntrinsics();
 		}
+		
+		// Force immediate redraw when frustum properties change
+		if (MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, bDrawFrustum) ||
+			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FrustumDrawDistance) ||
+			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FrustumColor) ||
+			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FrustumLineThickness) ||
+			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, bUseCustomIntrinsics) ||
+			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FOVAngle))
+		{
+			// Draw new frustum immediately if enabled
+			if (bDrawFrustum)
+			{
+				DrawCameraFrustum();
+			}
+			
+			MarkRenderStateDirty();
+		}
+	}
+}
+
+void UIntrinsicSceneCaptureComponent2D::OnRegister()
+{
+	Super::OnRegister();
+	
+	// Draw frustum immediately in editor
+	if (GIsEditor && !GetWorld()->IsGameWorld() && bDrawFrustum)
+	{
+		DrawCameraFrustum();
 	}
 }
 #endif
@@ -145,4 +191,126 @@ FMatrix UIntrinsicSceneCaptureComponent2D::BuildProjectionMatrixFromIntrinsics(c
 	ProjectionMatrix.M[3][3] = 0.0f;
 	
 	return ProjectionMatrix;
+}
+
+void UIntrinsicSceneCaptureComponent2D::DrawCameraFrustum()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	// Determine if we're in editor mode
+	bool bIsEditorWorld = GIsEditor && !World->IsGameWorld();
+	
+	// Get the camera's world transform
+	FTransform CameraTransform = GetComponentTransform();
+	FVector CameraLocation = CameraTransform.GetLocation();
+	FRotator CameraRotation = CameraTransform.Rotator();
+
+	// Determine which projection matrix to use
+	FMatrix ProjectionMatrix;
+	bool bHasValidProjection = false;
+
+	if (bUseCustomIntrinsics && bUseCustomProjectionMatrix)
+	{
+		// Use the custom projection matrix from intrinsics
+		ProjectionMatrix = CustomProjectionMatrix;
+		bHasValidProjection = true;
+	}
+	else if (!bUseCustomIntrinsics || (bUseCustomIntrinsics && GetActiveIntrinsics().bMaintainYAxis))
+	{
+		// Use FOV-based projection
+		float AspectRatio = 1.777f; // Default 16:9
+		if (TextureTarget)
+		{
+			AspectRatio = static_cast<float>(TextureTarget->SizeX) / static_cast<float>(TextureTarget->SizeY);
+		}
+		else if (bUseCustomIntrinsics)
+		{
+			FCameraIntrinsics Intrinsics = GetActiveIntrinsics();
+			AspectRatio = static_cast<float>(Intrinsics.ImageWidth) / static_cast<float>(Intrinsics.ImageHeight);
+		}
+
+		// Build standard perspective projection from FOV
+		float HalfFOVRad = FMath::DegreesToRadians(FOVAngle * 0.5f);
+		ProjectionMatrix = FReversedZPerspectiveMatrix(HalfFOVRad, AspectRatio, 1.0f, GNearClippingPlane);
+		bHasValidProjection = true;
+	}
+
+	if (!bHasValidProjection)
+	{
+		return;
+	}
+
+	// Invert the projection matrix to get view-space corners
+	FMatrix InvProjectionMatrix = ProjectionMatrix.Inverse();
+
+	// Define the 4 corners of the far plane in normalized device coordinates (NDC)
+	// NDC: X[-1,1], Y[-1,1], Z[0,1] (reversed-Z)
+	FVector4 NDCCorners[4] = {
+		FVector4(-1.0f, -1.0f, 0.0f, 1.0f), // Bottom-left
+		FVector4( 1.0f, -1.0f, 0.0f, 1.0f), // Bottom-right
+		FVector4( 1.0f,  1.0f, 0.0f, 1.0f), // Top-right
+		FVector4(-1.0f,  1.0f, 0.0f, 1.0f)  // Top-left
+	};
+
+	// Transform corners from NDC to view space, then scale to desired draw distance
+	FVector ViewSpaceCorners[4];
+	for (int32 i = 0; i < 4; i++)
+	{
+		FVector4 ViewSpace4 = InvProjectionMatrix.TransformFVector4(NDCCorners[i]);
+		
+		// Perspective divide
+		if (FMath::Abs(ViewSpace4.W) > SMALL_NUMBER)
+		{
+			ViewSpaceCorners[i] = FVector(ViewSpace4.X, ViewSpace4.Y, ViewSpace4.Z) / ViewSpace4.W;
+		}
+		else
+		{
+			ViewSpaceCorners[i] = FVector(ViewSpace4.X, ViewSpace4.Y, ViewSpace4.Z);
+		}
+
+		// Normalize and scale to frustum draw distance
+		// Note: Projection matrix gives us view space where camera looks down +X axis
+		// Scale the direction from origin to the desired distance
+		ViewSpaceCorners[i] = ViewSpaceCorners[i].GetSafeNormal() * FrustumDrawDistance;
+	}
+
+	// Transform view-space corners to world space
+	// UE SceneCaptureComponent2D: Camera looks down +X (Forward), Y=Right, Z=Up in local space
+	// But view space from projection matrix: X=right, Y=up, Z=back (OpenGL convention)
+	// We need to convert: ViewSpace.X->LocalY, ViewSpace.Y->LocalZ, ViewSpace.Z->LocalX (negated)
+	FVector WorldCorners[4];
+	for (int32 i = 0; i < 4; i++)
+	{
+		FVector LocalSpace;
+		LocalSpace.X = ViewSpaceCorners[i].Z;  // View back (Z) -> Local forward (X) - flip to point forward
+		LocalSpace.Y = ViewSpaceCorners[i].X;  // View right (X) -> Local right (Y)
+		LocalSpace.Z = ViewSpaceCorners[i].Y;  // View up (Y) -> Local up (Z)
+		
+		WorldCorners[i] = CameraTransform.TransformPosition(LocalSpace);
+	}
+
+	// Use short-lifetime non-persistent lines that auto-expire
+	// This allows multiple cameras to draw simultaneously without interfering
+	float LifeTime = 0.1f; // Short lifetime, refreshed every tick
+	bool bPersistent = false;
+
+	// Draw lines from camera origin to each corner
+	for (int32 i = 0; i < 4; i++)
+	{
+		DrawDebugLine(World, CameraLocation, WorldCorners[i], FrustumColor, bPersistent, LifeTime, 0, FrustumLineThickness);
+	}
+
+	// Draw lines connecting the corners (far plane rectangle)
+	for (int32 i = 0; i < 4; i++)
+	{
+		int32 NextIdx = (i + 1) % 4;
+		DrawDebugLine(World, WorldCorners[i], WorldCorners[NextIdx], FrustumColor, bPersistent, LifeTime, 0, FrustumLineThickness);
+	}
+
+	// Optionally draw a small cross at the camera origin for reference
+	DrawDebugCrosshairs(World, CameraLocation, CameraRotation, 10.0f, FrustumColor, bPersistent, LifeTime, 0);
 }
