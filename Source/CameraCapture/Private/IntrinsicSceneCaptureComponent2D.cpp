@@ -1,6 +1,10 @@
 #include "IntrinsicSceneCaptureComponent2D.h"
 #include "DrawDebugHelpers.h"
 
+#if WITH_EDITOR
+#include "UObject/UObjectGlobals.h"
+#endif
+
 UIntrinsicSceneCaptureComponent2D::UIntrinsicSceneCaptureComponent2D()
 {
 	PrimaryComponentTick.bCanEverTick = true;
@@ -56,6 +60,12 @@ void UIntrinsicSceneCaptureComponent2D::PostEditChangeProperty(FPropertyChangedE
 			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, InlineIntrinsics))
 		{
 			ApplyIntrinsics();
+			
+			// Redraw frustum if enabled since intrinsics affect the frustum shape
+			if (bDrawFrustum)
+			{
+				DrawCameraFrustum();
+			}
 		}
 		
 		// Force immediate redraw when frustum properties change
@@ -63,7 +73,6 @@ void UIntrinsicSceneCaptureComponent2D::PostEditChangeProperty(FPropertyChangedE
 			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FrustumDrawDistance) ||
 			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FrustumColor) ||
 			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FrustumLineThickness) ||
-			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, bUseCustomIntrinsics) ||
 			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FOVAngle))
 		{
 			// Draw new frustum immediately if enabled
@@ -75,16 +84,74 @@ void UIntrinsicSceneCaptureComponent2D::PostEditChangeProperty(FPropertyChangedE
 			MarkRenderStateDirty();
 		}
 	}
+	else if (PropertyChangedEvent.Property != nullptr)
+	{
+		// Handle changes to properties within the IntrinsicsAsset or InlineIntrinsics struct
+		FName PropertyName = PropertyChangedEvent.Property->GetFName();
+		
+		// Check if any intrinsics parameter changed (focal length, principal point, etc.)
+		if (PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, FocalLengthX) ||
+			PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, FocalLengthY) ||
+			PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, PrincipalPointX) ||
+			PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, PrincipalPointY) ||
+			PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, ImageWidth) ||
+			PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, ImageHeight) ||
+			PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, bMaintainYAxis))
+		{
+			ApplyIntrinsics();
+			
+			// Redraw frustum if enabled
+			if (bDrawFrustum)
+			{
+				DrawCameraFrustum();
+			}
+		}
+	}
 }
 
 void UIntrinsicSceneCaptureComponent2D::OnRegister()
 {
 	Super::OnRegister();
 	
+	// Register delegate to listen for property changes on any object
+	if (!OnObjectPropertyChangedHandle.IsValid())
+	{
+		OnObjectPropertyChangedHandle = FCoreUObjectDelegates::OnObjectPropertyChanged.AddUObject(
+			this, &UIntrinsicSceneCaptureComponent2D::OnObjectPropertyChanged);
+	}
+	
 	// Draw frustum immediately in editor
 	if (GIsEditor && !GetWorld()->IsGameWorld() && bDrawFrustum)
 	{
 		DrawCameraFrustum();
+	}
+}
+
+void UIntrinsicSceneCaptureComponent2D::OnUnregister()
+{
+	// Unregister delegate
+	if (OnObjectPropertyChangedHandle.IsValid())
+	{
+		FCoreUObjectDelegates::OnObjectPropertyChanged.Remove(OnObjectPropertyChangedHandle);
+		OnObjectPropertyChangedHandle.Reset();
+	}
+	
+	Super::OnUnregister();
+}
+
+void UIntrinsicSceneCaptureComponent2D::OnObjectPropertyChanged(UObject* Object, FPropertyChangedEvent& PropertyChangedEvent)
+{
+	// Check if the changed object is our IntrinsicsAsset
+	if (Object == IntrinsicsAsset && IntrinsicsAsset != nullptr && bUseIntrinsicsAsset)
+	{
+		// An intrinsics property changed in our referenced asset
+		ApplyIntrinsics();
+		
+		// Redraw frustum if enabled
+		if (bDrawFrustum)
+		{
+			DrawCameraFrustum();
+		}
 	}
 }
 #endif

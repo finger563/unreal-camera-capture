@@ -70,5 +70,12 @@ protected:
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 	virtual void OnRegister() override;
+	virtual void OnUnregister() override;
+	
+	/** Handle when any object property changes (used to detect asset changes) */
+	void OnObjectPropertyChanged(UObject* Object, FPropertyChangedEvent& PropertyChangedEvent);
+	
+	/** Delegate handle for object property changed */
+	FDelegateHandle OnObjectPropertyChangedHandle;
 #endif
 };
