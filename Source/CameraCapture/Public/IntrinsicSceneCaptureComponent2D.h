@@ -56,6 +56,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (EditCondition = "bDrawFrustumInGame | bDrawFrustumInEditor", ClampMin = "10.0", DisplayName = "Frustum Draw Distance", ToolTip = "Distance to the far plane of the visualized frustum (in cm)"))
 	float FrustumDrawDistance = 500.0f;
 
+	/** Distance to draw the near plane of the frustum (in cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (EditCondition = "bDrawFrustumInGame | bDrawFrustumInEditor", ClampMin = "1.0", DisplayName = "Frustum Near Distance", ToolTip = "Distance to the near plane of the visualized frustum (in cm)"))
+	float FrustumNearDistance = 10.0f;
+
 	/** Color of the frustum lines */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (EditCondition = "bDrawFrustumInGame | bDrawFrustumInEditor", DisplayName = "Frustum Color", ToolTip = "Color of the frustum visualization lines"))
 	FColor FrustumColor = FColor::Yellow;
@@ -63,6 +67,14 @@ public:
 	/** Thickness of frustum lines */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (EditCondition = "bDrawFrustumInGame | bDrawFrustumInEditor", ClampMin = "0.0", DisplayName = "Frustum Line Thickness", ToolTip = "Thickness of the frustum visualization lines"))
 	float FrustumLineThickness = 2.0f;
+
+	/** Whether to draw frustum planes (filled quads) for overlap visualization */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (EditCondition = "bDrawFrustumInGame | bDrawFrustumInEditor", DisplayName = "Draw Frustum Planes", ToolTip = "Draw filled frustum planes to help visualize overlap."))
+	bool bDrawFrustumPlanes = true;
+
+	/** Color of the frustum planes (alpha supported) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (EditCondition = "bDrawFrustumInGame | bDrawFrustumInEditor", DisplayName = "Frustum Plane Color", ToolTip = "Color of the frustum planes (alpha supported)."))
+	FLinearColor FrustumPlaneColor = FLinearColor(1.0f, 1.0f, 0.0f, 0.15f);
 
 	/** Custom metadata to include in capture output (managed by CameraCaptureManager) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (DisplayName = "Custom Metadata", ToolTip = "Additional key-value metadata to include in capture JSON"))
