@@ -1,5 +1,7 @@
 #include "IntrinsicSceneCaptureComponent2D.h"
+#include "CameraCaptureSubsystem.h"
 #include "DrawDebugHelpers.h"
+#include "Engine/World.h"
 
 #if WITH_EDITOR
 #include "UObject/UObjectGlobals.h"
@@ -36,11 +38,19 @@ void UIntrinsicSceneCaptureComponent2D::TickComponent(float DeltaTime, ELevelTic
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	// Draw frustum if enabled (works in both editor and runtime)
-	if (bDrawFrustum)
+    // Drew frustum in-game if enabled
+	if (bDrawFrustumInGame)
 	{
 		DrawCameraFrustum();
 	}
+
+	// Draw frustum in-editor if enabled, but not when PIE is active
+#if WITH_EDITOR
+    if (GIsEditor && bDrawFrustumInEditor && !GetWorld()->IsPlayInEditor())
+      {
+        DrawCameraFrustum();
+      }
+#endif
 }
 
 #if WITH_EDITOR
@@ -60,27 +70,15 @@ void UIntrinsicSceneCaptureComponent2D::PostEditChangeProperty(FPropertyChangedE
 			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, InlineIntrinsics))
 		{
 			ApplyIntrinsics();
-			
-			// Redraw frustum if enabled since intrinsics affect the frustum shape
-			if (bDrawFrustum)
-			{
-				DrawCameraFrustum();
-			}
 		}
 		
 		// Force immediate redraw when frustum properties change
-		if (MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, bDrawFrustum) ||
+		if (MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, bDrawFrustumInEditor) ||
 			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FrustumDrawDistance) ||
 			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FrustumColor) ||
 			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FrustumLineThickness) ||
 			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FOVAngle))
 		{
-			// Draw new frustum immediately if enabled
-			if (bDrawFrustum)
-			{
-				DrawCameraFrustum();
-			}
-			
 			MarkRenderStateDirty();
 		}
 	}
@@ -99,12 +97,6 @@ void UIntrinsicSceneCaptureComponent2D::PostEditChangeProperty(FPropertyChangedE
 			PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, bMaintainYAxis))
 		{
 			ApplyIntrinsics();
-			
-			// Redraw frustum if enabled
-			if (bDrawFrustum)
-			{
-				DrawCameraFrustum();
-			}
 		}
 	}
 }
@@ -118,12 +110,6 @@ void UIntrinsicSceneCaptureComponent2D::OnRegister()
 	{
 		OnObjectPropertyChangedHandle = FCoreUObjectDelegates::OnObjectPropertyChanged.AddUObject(
 			this, &UIntrinsicSceneCaptureComponent2D::OnObjectPropertyChanged);
-	}
-	
-	// Draw frustum immediately in editor
-	if (GIsEditor && !GetWorld()->IsGameWorld() && bDrawFrustum)
-	{
-		DrawCameraFrustum();
 	}
 }
 
@@ -145,13 +131,7 @@ void UIntrinsicSceneCaptureComponent2D::OnObjectPropertyChanged(UObject* Object,
 	if (Object == IntrinsicsAsset && IntrinsicsAsset != nullptr && bUseIntrinsicsAsset)
 	{
 		// An intrinsics property changed in our referenced asset
-		ApplyIntrinsics();
-		
-		// Redraw frustum if enabled
-		if (bDrawFrustum)
-		{
-			DrawCameraFrustum();
-		}
+		ApplyIntrinsics();		
 	}
 }
 #endif

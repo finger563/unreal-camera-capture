@@ -45,20 +45,28 @@ public:
 	static FMatrix BuildProjectionMatrixFromIntrinsics(const FCameraIntrinsics& Intrinsics);
 
 	/** Whether to draw the camera frustum for visualization */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (DisplayName = "Draw Frustum", ToolTip = "Enable to visualize the camera's field of view frustum"))
-	bool bDrawFrustum = false;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (DisplayName = "Draw Frustum In Game", ToolTip = "Enable to visualize the camera's field of view frustum in game"))
+	bool bDrawFrustumInGame = false;
+
+    /** Whether to draw the camera frustum in the editor */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (DisplayName = "Draw Frustum In Editor", ToolTip = "Enable to visualize the camera's field of view frustum in the editor."))
+    bool bDrawFrustumInEditor = true;
 
 	/** Distance to draw the far plane of the frustum (in cm) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (EditCondition = "bDrawFrustum", ClampMin = "10.0", DisplayName = "Frustum Draw Distance", ToolTip = "Distance to the far plane of the visualized frustum (in cm)"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (EditCondition = "bDrawFrustumInGame | bDrawFrustumInEditor", ClampMin = "10.0", DisplayName = "Frustum Draw Distance", ToolTip = "Distance to the far plane of the visualized frustum (in cm)"))
 	float FrustumDrawDistance = 500.0f;
 
 	/** Color of the frustum lines */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (EditCondition = "bDrawFrustum", DisplayName = "Frustum Color", ToolTip = "Color of the frustum visualization lines"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (EditCondition = "bDrawFrustumInGame | bDrawFrustumInEditor", DisplayName = "Frustum Color", ToolTip = "Color of the frustum visualization lines"))
 	FColor FrustumColor = FColor::Yellow;
 
 	/** Thickness of frustum lines */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (EditCondition = "bDrawFrustum", ClampMin = "0.0", DisplayName = "Frustum Line Thickness", ToolTip = "Thickness of the frustum visualization lines"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (EditCondition = "bDrawFrustumInGame | bDrawFrustumInEditor", ClampMin = "0.0", DisplayName = "Frustum Line Thickness", ToolTip = "Thickness of the frustum visualization lines"))
 	float FrustumLineThickness = 2.0f;
+
+	/** Custom metadata to include in capture output (managed by CameraCaptureManager) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (DisplayName = "Custom Metadata", ToolTip = "Additional key-value metadata to include in capture JSON"))
+	TMap<FString, FString> CustomMetadata;
 
 protected:
 	virtual void BeginPlay() override;

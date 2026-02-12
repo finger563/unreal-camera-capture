@@ -31,7 +31,10 @@ public class CameraCapture : ModuleRules
 				"InputCore",
 				"RHI", "RenderCore", // Needed to use the RenderRequest / RHI framework
                 "Json", // needed to use FJsonObject and related classes / functions
+				"JsonUtilities", // needed for JSON serialization
 				"Projects",
+				"ImageWriteQueue", // needed for image writing
+				"ImageWrapper", // needed for image format support including EXR
 				// ... add other public dependencies that you statically link with here ...
 			}
 			);
