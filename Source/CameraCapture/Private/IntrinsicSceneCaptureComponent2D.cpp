@@ -350,9 +350,7 @@ void UIntrinsicSceneCaptureComponent2D::DrawCameraFrustum()
 		FarWorld[i] = CameraTransform.TransformPosition(LocalFar);
 	}
 
-	// Use short-lifetime non-persistent lines that auto-expire
-	// This allows multiple cameras to draw simultaneously without interfering
-	float LifeTime = 0.1f; // Short lifetime, refreshed every tick
+	float LifeTime = 0.0f; // 0 = single frame, >0 for persistent, <0 for infinite 
 	bool bPersistent = false;
 
 	// Draw lines from camera origin to each corner
