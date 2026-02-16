@@ -4,19 +4,19 @@
 #include "Engine/World.h"
 
 #if WITH_EDITOR
-#include "UObject/UObjectGlobals.h"
+	#include "UObject/UObjectGlobals.h"
 #endif
 
 UIntrinsicSceneCaptureComponent2D::UIntrinsicSceneCaptureComponent2D()
 {
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.TickGroup = TG_DuringPhysics;
-	
+
 #if WITH_EDITORONLY_DATA
 	// Enable ticking in editor for frustum visualization
 	bTickInEditor = true;
 #endif
-	
+
 	// We control capture timing via CaptureComponent, so disable auto-capture
 	bCaptureEveryFrame = false;
 	bCaptureOnMovement = false;
@@ -38,7 +38,7 @@ void UIntrinsicSceneCaptureComponent2D::TickComponent(float DeltaTime, ELevelTic
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-    // Drew frustum in-game if enabled
+	// Drew frustum in-game if enabled
 	if (bDrawFrustumInGame)
 	{
 		DrawCameraFrustum();
@@ -46,10 +46,10 @@ void UIntrinsicSceneCaptureComponent2D::TickComponent(float DeltaTime, ELevelTic
 
 	// Draw frustum in-editor if enabled, but not when PIE is active
 #if WITH_EDITOR
-    if (GIsEditor && bDrawFrustumInEditor && !GetWorld()->IsPlayInEditor())
-      {
-        DrawCameraFrustum();
-      }
+	if (GIsEditor && bDrawFrustumInEditor && !GetWorld()->IsPlayInEditor())
+	{
+		DrawCameraFrustum();
+	}
 #endif
 }
 
@@ -62,25 +62,15 @@ void UIntrinsicSceneCaptureComponent2D::PostEditChangeProperty(FPropertyChangedE
 	if (PropertyChangedEvent.MemberProperty != nullptr)
 	{
 		FName MemberPropertyName = PropertyChangedEvent.MemberProperty->GetFName();
-		
+
 		// Check if any intrinsics-related property changed
-		if (MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, bUseCustomIntrinsics) ||
-			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, bUseIntrinsicsAsset) ||
-			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, IntrinsicsAsset) ||
-			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, InlineIntrinsics))
+		if (MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, bUseCustomIntrinsics) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, bUseIntrinsicsAsset) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, IntrinsicsAsset) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, InlineIntrinsics))
 		{
 			ApplyIntrinsics();
 		}
-		
+
 		// Force immediate redraw when frustum properties change
-		if (MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, bDrawFrustumInEditor) ||
-			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FrustumDrawDistance) ||
-			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FrustumNearDistance) ||
-			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FrustumColor) ||
-			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FrustumLineThickness) ||
-			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, bDrawFrustumPlanes) ||
-			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FrustumPlaneColor) ||
-			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FOVAngle))
+		if (MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, bDrawFrustumInEditor) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FrustumDrawDistance) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FrustumNearDistance) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FrustumColor) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FrustumLineThickness) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, bDrawFrustumPlanes) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FrustumPlaneColor) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FOVAngle))
 		{
 			MarkRenderStateDirty();
 		}
@@ -89,15 +79,9 @@ void UIntrinsicSceneCaptureComponent2D::PostEditChangeProperty(FPropertyChangedE
 	{
 		// Handle changes to properties within the IntrinsicsAsset or InlineIntrinsics struct
 		FName PropertyName = PropertyChangedEvent.Property->GetFName();
-		
+
 		// Check if any intrinsics parameter changed (focal length, principal point, etc.)
-		if (PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, FocalLengthX) ||
-			PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, FocalLengthY) ||
-			PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, PrincipalPointX) ||
-			PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, PrincipalPointY) ||
-			PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, ImageWidth) ||
-			PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, ImageHeight) ||
-			PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, bMaintainYAxis))
+		if (PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, FocalLengthX) || PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, FocalLengthY) || PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, PrincipalPointX) || PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, PrincipalPointY) || PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, ImageWidth) || PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, ImageHeight) || PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, bMaintainYAxis))
 		{
 			ApplyIntrinsics();
 		}
@@ -107,7 +91,7 @@ void UIntrinsicSceneCaptureComponent2D::PostEditChangeProperty(FPropertyChangedE
 void UIntrinsicSceneCaptureComponent2D::OnRegister()
 {
 	Super::OnRegister();
-	
+
 	// Register delegate to listen for property changes on any object
 	if (!OnObjectPropertyChangedHandle.IsValid())
 	{
@@ -124,7 +108,7 @@ void UIntrinsicSceneCaptureComponent2D::OnUnregister()
 		FCoreUObjectDelegates::OnObjectPropertyChanged.Remove(OnObjectPropertyChangedHandle);
 		OnObjectPropertyChangedHandle.Reset();
 	}
-	
+
 	Super::OnUnregister();
 }
 
@@ -134,7 +118,7 @@ void UIntrinsicSceneCaptureComponent2D::OnObjectPropertyChanged(UObject* Object,
 	if (Object == IntrinsicsAsset && IntrinsicsAsset != nullptr && bUseIntrinsicsAsset)
 	{
 		// An intrinsics property changed in our referenced asset
-		ApplyIntrinsics();		
+		ApplyIntrinsics();
 	}
 }
 #endif
@@ -172,18 +156,18 @@ void UIntrinsicSceneCaptureComponent2D::ApplyIntrinsics()
 	{
 		// Adjust FOV to maintain Y-axis (vertical FOV) like gameplay camera
 		float AspectRatio = static_cast<float>(Intrinsics.ImageWidth) / static_cast<float>(Intrinsics.ImageHeight);
-		
+
 		// Assume the current FOV is for a 16:9 aspect ratio (standard)
 		float ReferenceAspect = 16.0f / 9.0f;
-		
+
 		// Derive vertical FOV from current horizontal FOV
 		float HalfHFOVRad = FMath::DegreesToRadians(FOVAngle * 0.5f);
 		float HalfVFOVRad = FMath::Atan(FMath::Tan(HalfHFOVRad) / ReferenceAspect);
-		
+
 		// Recalculate horizontal FOV for the actual aspect ratio
 		float NewHalfHFOVRad = FMath::Atan(AspectRatio * FMath::Tan(HalfVFOVRad));
 		FOVAngle = FMath::RadiansToDegrees(NewHalfHFOVRad * 2.0f);
-		
+
 		bUseCustomProjectionMatrix = false;
 
 		UE_LOG(LogTemp, Log, TEXT("Applied Maintain Y-Axis to %s: New HFOV=%.2f deg (Aspect=%.3f)"),
@@ -196,7 +180,7 @@ void UIntrinsicSceneCaptureComponent2D::ApplyIntrinsics()
 		bUseCustomProjectionMatrix = true;
 
 		UE_LOG(LogTemp, Log, TEXT("Applied custom projection matrix to %s (fx=%.2f, fy=%.2f, cx=%.2f, cy=%.2f, %dx%d)"),
-			*GetName(), Intrinsics.FocalLengthX, Intrinsics.FocalLengthY, 
+			*GetName(), Intrinsics.FocalLengthX, Intrinsics.FocalLengthY,
 			Intrinsics.PrincipalPointX, Intrinsics.PrincipalPointY,
 			Intrinsics.ImageWidth, Intrinsics.ImageHeight);
 	}
@@ -214,32 +198,32 @@ FMatrix UIntrinsicSceneCaptureComponent2D::BuildProjectionMatrixFromIntrinsics(c
 
 	float Width = static_cast<float>(Intrinsics.ImageWidth);
 	float Height = static_cast<float>(Intrinsics.ImageHeight);
-	
+
 	// Convert from pixel-based intrinsics to normalized coordinates
 	float fx = Intrinsics.FocalLengthX / Width;
 	float fy = Intrinsics.FocalLengthY / Height;
 	float cx = (Intrinsics.PrincipalPointX - Width * 0.5f) / Width;
 	float cy = (Intrinsics.PrincipalPointY - Height * 0.5f) / Height;
-	
+
 	// Use GNearClippingPlane for consistency with config export
 	// Note: Using infinite far plane (reversed-Z projection)
 	float NearClip = GNearClippingPlane;
-	
+
 	// Build custom projection matrix from camera intrinsics
 	FMatrix ProjectionMatrix = FMatrix::Identity;
-	
+
 	// Scale factors from pixel space to normalized device coordinates
 	ProjectionMatrix.M[0][0] = 2.0f * fx;
 	ProjectionMatrix.M[1][1] = 2.0f * fy;
 	ProjectionMatrix.M[2][0] = 2.0f * cx;
 	ProjectionMatrix.M[2][1] = -2.0f * cy; // Flip Y for UE coordinate system
-	
+
 	// Standard perspective projection depth terms (reversed-Z with infinite far plane)
 	ProjectionMatrix.M[2][2] = 0.0f;
 	ProjectionMatrix.M[2][3] = 1.0f;
 	ProjectionMatrix.M[3][2] = NearClip;
 	ProjectionMatrix.M[3][3] = 0.0f;
-	
+
 	return ProjectionMatrix;
 }
 
@@ -253,16 +237,16 @@ void UIntrinsicSceneCaptureComponent2D::DrawCameraFrustum()
 
 	// Determine if we're in editor mode
 	bool bIsEditorWorld = GIsEditor && !World->IsGameWorld();
-	
+
 	// Get the camera's world transform (ignore scale for frustum drawing)
 	FTransform CameraTransform = GetComponentTransform();
 	CameraTransform.SetScale3D(FVector::OneVector); // Always use scale of 1.0 for frustum
-	FVector CameraLocation = CameraTransform.GetLocation();
+	FVector	 CameraLocation = CameraTransform.GetLocation();
 	FRotator CameraRotation = CameraTransform.Rotator();
 
 	// Determine which projection matrix to use
 	FMatrix ProjectionMatrix;
-	bool bHasValidProjection = false;
+	bool	bHasValidProjection = false;
 
 	if (bUseCustomIntrinsics && bUseCustomProjectionMatrix)
 	{
@@ -302,9 +286,9 @@ void UIntrinsicSceneCaptureComponent2D::DrawCameraFrustum()
 	// NDC: X[-1,1], Y[-1,1], Z[0,1] (reversed-Z)
 	FVector4 NDCCorners[4] = {
 		FVector4(-1.0f, -1.0f, 0.0f, 1.0f), // Bottom-left
-		FVector4( 1.0f, -1.0f, 0.0f, 1.0f), // Bottom-right
-		FVector4( 1.0f,  1.0f, 0.0f, 1.0f), // Top-right
-		FVector4(-1.0f,  1.0f, 0.0f, 1.0f)  // Top-left
+		FVector4(1.0f, -1.0f, 0.0f, 1.0f),	// Bottom-right
+		FVector4(1.0f, 1.0f, 0.0f, 1.0f),	// Top-right
+		FVector4(-1.0f, 1.0f, 0.0f, 1.0f)	// Top-left
 	};
 
 	// Transform corners from NDC to view space, then normalize to get direction vectors
@@ -312,7 +296,7 @@ void UIntrinsicSceneCaptureComponent2D::DrawCameraFrustum()
 	for (int32 i = 0; i < 4; i++)
 	{
 		FVector4 ViewSpace4 = InvProjectionMatrix.TransformFVector4(NDCCorners[i]);
-		
+
 		// Perspective divide
 		if (FMath::Abs(ViewSpace4.W) > SMALL_NUMBER)
 		{
@@ -337,8 +321,8 @@ void UIntrinsicSceneCaptureComponent2D::DrawCameraFrustum()
 	for (int32 i = 0; i < 4; i++)
 	{
 		const FVector ViewDir = ViewSpaceDirs[i];
-		FVector LocalNear;
-		FVector LocalFar;
+		FVector		  LocalNear;
+		FVector		  LocalFar;
 		LocalNear.X = ViewDir.Z * NearDist; // View back (Z) -> Local forward (X)
 		LocalNear.Y = ViewDir.X * NearDist; // View right (X) -> Local right (Y)
 		LocalNear.Z = ViewDir.Y * NearDist; // View up (Y) -> Local up (Z)
@@ -351,8 +335,8 @@ void UIntrinsicSceneCaptureComponent2D::DrawCameraFrustum()
 		FarWorld[i] = CameraTransform.TransformPosition(LocalFar);
 	}
 
-	float LifeTime = 0.0f; // 0 = single frame, >0 for persistent, <0 for infinite 
-	bool bPersistent = false;
+	float LifeTime = 0.0f; // 0 = single frame, >0 for persistent, <0 for infinite
+	bool  bPersistent = false;
 
 	// Draw lines from camera origin to each corner
 	for (int32 i = 0; i < 4; i++)
@@ -373,8 +357,7 @@ void UIntrinsicSceneCaptureComponent2D::DrawCameraFrustum()
 	{
 		const FColor PlaneColor = FrustumPlaneColor.ToFColor(true);
 
-		auto DrawQuad = [&](const FVector& A, const FVector& B, const FVector& C, const FVector& D)
-		{
+		auto DrawQuad = [&](const FVector& A, const FVector& B, const FVector& C, const FVector& D) {
 			TArray<FVector> Verts;
 			Verts.Reserve(4);
 			Verts.Add(A);
@@ -384,8 +367,12 @@ void UIntrinsicSceneCaptureComponent2D::DrawCameraFrustum()
 
 			TArray<int32> Indices;
 			Indices.Reserve(6);
-			Indices.Add(0); Indices.Add(1); Indices.Add(2);
-			Indices.Add(0); Indices.Add(2); Indices.Add(3);
+			Indices.Add(0);
+			Indices.Add(1);
+			Indices.Add(2);
+			Indices.Add(0);
+			Indices.Add(2);
+			Indices.Add(3);
 
 			DrawDebugMesh(World, Verts, Indices, PlaneColor, bPersistent, LifeTime, 0);
 		};

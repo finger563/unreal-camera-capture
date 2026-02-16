@@ -48,9 +48,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (DisplayName = "Draw Frustum In Game", ToolTip = "Enable to visualize the camera's field of view frustum in game"))
 	bool bDrawFrustumInGame = false;
 
-    /** Whether to draw the camera frustum in the editor */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (DisplayName = "Draw Frustum In Editor", ToolTip = "Enable to visualize the camera's field of view frustum in the editor."))
-    bool bDrawFrustumInEditor = true;
+	/** Whether to draw the camera frustum in the editor */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (DisplayName = "Draw Frustum In Editor", ToolTip = "Enable to visualize the camera's field of view frustum in the editor."))
+	bool bDrawFrustumInEditor = true;
 
 	/** Distance to draw the far plane of the frustum (in cm) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (EditCondition = "bDrawFrustumInGame | bDrawFrustumInEditor", ClampMin = "10.0", DisplayName = "Frustum Draw Distance", ToolTip = "Distance to the far plane of the visualized frustum (in cm)"))
@@ -91,10 +91,10 @@ protected:
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 	virtual void OnRegister() override;
 	virtual void OnUnregister() override;
-	
+
 	/** Handle when any object property changes (used to detect asset changes) */
 	void OnObjectPropertyChanged(UObject* Object, FPropertyChangedEvent& PropertyChangedEvent);
-	
+
 	/** Delegate handle for object property changed */
 	FDelegateHandle OnObjectPropertyChangedHandle;
 #endif

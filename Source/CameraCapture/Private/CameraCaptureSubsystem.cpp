@@ -36,16 +36,16 @@ FCameraIdentifier FCameraIdentifier::Generate(const UIntrinsicSceneCaptureCompon
 	}
 
 	AActor* Owner = Camera->GetOwner();
-	
+
 	// Get actor name (e.g., "Robot_BP_C_0")
 	Identifier.ActorName = Owner->GetName();
-	
+
 	// Get component name (e.g., "HeadCamera")
 	Identifier.ComponentName = Camera->GetName();
-	
+
 	// Generate unique ID
 	Identifier.UniqueID = FString::Printf(TEXT("%s::%s"), *Identifier.ActorName, *Identifier.ComponentName);
-	
+
 	// Generate fallback GUID
 	Identifier.FallbackGUID = FGuid::NewGuid();
 
@@ -70,12 +70,12 @@ UCameraCaptureSubsystem::UCameraCaptureSubsystem()
 void UCameraCaptureSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
-	
+
 	// Load M_DmvCapture material from plugin Content folder
 	// This is the same path used by CaptureComponent
 	FString MaterialPath = TEXT("/Script/Engine.Material'/CameraCapture/Materials/M_DmvCapture.M_DmvCapture'");
 	DmvCaptureMaterialBase = Cast<UMaterial>(StaticLoadObject(UMaterial::StaticClass(), nullptr, *MaterialPath));
-	
+
 	if (!DmvCaptureMaterialBase)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[CameraCaptureSubsystem] Failed to load M_DmvCapture material from: %s"), *MaterialPath);
@@ -85,7 +85,7 @@ void UCameraCaptureSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	{
 		UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Loaded M_DmvCapture material successfully from plugin"));
 	}
-	
+
 	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Initialized"));
 }
 
@@ -105,13 +105,13 @@ void UCameraCaptureSubsystem::Deinitialize()
 	DmvCameras.Empty();
 
 	Super::Deinitialize();
-	
+
 	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Deinitialized"));
 }
 
 void UCameraCaptureSubsystem::Tick(float DeltaTime)
 {
-  Super::Tick(DeltaTime);
+	Super::Tick(DeltaTime);
 
 	// Safety check - only tick if initialized and capturing
 	if (!IsInitialized() || !bIsCapturing)
@@ -142,7 +142,7 @@ bool UCameraCaptureSubsystem::IsTickable() const
 void UCameraCaptureSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 {
 	Super::OnWorldBeginPlay(InWorld);
-	
+
 	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] World begin play"));
 }
 
@@ -157,7 +157,7 @@ void UCameraCaptureSubsystem::RegisterCamera(UIntrinsicSceneCaptureComponent2D* 
 		UE_LOG(LogTemp, Warning, TEXT("[CameraCaptureSubsystem] Attempted to register null camera"));
 		return;
 	}
-	
+
 	if (!IsInitialized())
 	{
 		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Cannot register camera - subsystem not initialized"));
@@ -198,19 +198,19 @@ void UCameraCaptureSubsystem::SetupDmvCamera(UIntrinsicSceneCaptureComponent2D* 
 
 	// Get intrinsics for render target creation
 	FCameraIntrinsics Intrinsics = RgbCamera->GetActiveIntrinsics();
-	int32 Width = Intrinsics.ImageWidth;
-	int32 Height = Intrinsics.ImageHeight;
+	int32			  Width = Intrinsics.ImageWidth;
+	int32			  Height = Intrinsics.ImageHeight;
 
 	// Create new DMV camera component attached to the RGB camera
-	FString DmvName = RgbCamera->GetName() + TEXT("_dmv");
+	FString					  DmvName = RgbCamera->GetName() + TEXT("_dmv");
 	USceneCaptureComponent2D* DmvCamera = NewObject<USceneCaptureComponent2D>(
 		RgbCamera->GetOwner(),
 		USceneCaptureComponent2D::StaticClass(),
 		FName(*DmvName),
 		RF_Transient,
-		RgbCamera  // Use RGB camera as template
+		RgbCamera // Use RGB camera as template
 	);
-	
+
 	if (!DmvCamera)
 	{
 		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Failed to create DMV camera for %s"), *RgbCamera->GetName());
@@ -221,20 +221,20 @@ void UCameraCaptureSubsystem::SetupDmvCamera(UIntrinsicSceneCaptureComponent2D* 
 	FAttachmentTransformRules AttachRules(EAttachmentRule::KeepRelative, true);
 	DmvCamera->AttachToComponent(RgbCamera, AttachRules);
 	DmvCamera->SetRelativeLocationAndRotation(FVector::ZeroVector, FRotator::ZeroRotator);
-	
+
 	// Configure DMV camera (same as CaptureComponent.cpp ConfigureDmvCamera)
 	DmvCamera->bCaptureEveryFrame = false;
 	DmvCamera->bCaptureOnMovement = false;
 	DmvCamera->bAlwaysPersistRenderingState = true;
 	DmvCamera->CaptureSource = SCS_FinalColorLDR;
-	
+
 	// Copy custom projection matrix if RGB camera uses one
 	if (RgbCamera->bUseCustomProjectionMatrix)
 	{
 		DmvCamera->bUseCustomProjectionMatrix = true;
 		DmvCamera->CustomProjectionMatrix = RgbCamera->CustomProjectionMatrix;
 	}
-	
+
 	// Create dynamic material instance
 	UMaterialInstanceDynamic* DmvMaterial = UMaterialInstanceDynamic::Create(DmvCaptureMaterialBase, this);
 	if (DmvMaterial)
@@ -248,21 +248,21 @@ void UCameraCaptureSubsystem::SetupDmvCamera(UIntrinsicSceneCaptureComponent2D* 
 		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Failed to create DMV material instance for %s"), *RgbCamera->GetName());
 		return;
 	}
-	
+
 	// Create render target for DMV
 	UTextureRenderTarget2D* DmvRT = NewObject<UTextureRenderTarget2D>(this);
-	DmvRT->RenderTargetFormat = RTF_RGBA32f;  // Float format for depth+motion
+	DmvRT->RenderTargetFormat = RTF_RGBA32f; // Float format for depth+motion
 	DmvRT->InitAutoFormat(Width, Height);
 	DmvRT->UpdateResourceImmediate(true);
 	DmvCamera->TextureTarget = DmvRT;
-	
+
 	// Register component so it gets ticked and rendered
 	DmvCamera->RegisterComponent();
-	
+
 	// Store references
 	DmvCameras.Add(RgbCamera, DmvCamera);
 	DmvRenderTargets.Add(RgbCamera, DmvRT);
-	
+
 	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Created DMV camera '%s' with render target (%dx%d)"),
 		*DmvName, Width, Height);
 }
@@ -276,7 +276,7 @@ void UCameraCaptureSubsystem::UnregisterCamera(UIntrinsicSceneCaptureComponent2D
 
 	// Remove from registry
 	int32 RemovedCount = RegisteredCameras.Remove(Camera);
-	
+
 	if (RemovedCount > 0)
 	{
 		FCameraIdentifier* CameraID = CameraIDMap.Find(Camera);
@@ -292,7 +292,7 @@ void UCameraCaptureSubsystem::UnregisterCamera(UIntrinsicSceneCaptureComponent2D
 					break;
 				}
 			}
-			
+
 			if (!bActorStillUsed)
 			{
 				UsedActorNames.Remove(CameraID->ActorName);
@@ -321,7 +321,7 @@ void UCameraCaptureSubsystem::UnregisterCamera(UIntrinsicSceneCaptureComponent2D
 TArray<UIntrinsicSceneCaptureComponent2D*> UCameraCaptureSubsystem::GetRegisteredCameras() const
 {
 	TArray<UIntrinsicSceneCaptureComponent2D*> ValidCameras;
-	
+
 	for (const TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D>& WeakCamera : RegisteredCameras)
 	{
 		if (WeakCamera.IsValid())
@@ -329,7 +329,7 @@ TArray<UIntrinsicSceneCaptureComponent2D*> UCameraCaptureSubsystem::GetRegistere
 			ValidCameras.Add(WeakCamera.Get());
 		}
 	}
-	
+
 	return ValidCameras;
 }
 
@@ -354,7 +354,7 @@ void UCameraCaptureSubsystem::StartCapture()
 	bIsCapturing = true;
 	CurrentFrameCounter = 0;
 	TotalFramesCaptured = 0;
-    FrameIdCounter = 0;
+	FrameIdCounter = 0;
 	CaptureStartTime = FPlatformTime::Seconds();
 
 	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Started capture with %d cameras"), RegisteredCameras.Num());
@@ -388,14 +388,14 @@ void UCameraCaptureSubsystem::CaptureFrame()
 void UCameraCaptureSubsystem::SetCaptureRate(int32 InCaptureEveryNFrames)
 {
 	CaptureEveryNFrames = FMath::Max(1, InCaptureEveryNFrames);
-	
+
 	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Set capture rate: every %d frame(s)"), CaptureEveryNFrames);
 }
 
 void UCameraCaptureSubsystem::SetOutputDirectory(const FString& Directory)
 {
 	OutputDirectory = Directory;
-	
+
 	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Set output directory: %s"), *OutputDirectory);
 }
 
@@ -404,8 +404,8 @@ void UCameraCaptureSubsystem::SetCaptureChannels(bool bRGB, bool bDepth, bool bM
 	bCaptureRGB = bRGB;
 	bCaptureDepth = bDepth;
 	bCaptureMotionVectors = bMotionVectors;
-	
-	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Set capture channels: RGB=%d, Depth=%d, Motion=%d"), 
+
+	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Set capture channels: RGB=%d, Depth=%d, Motion=%d"),
 		bRGB, bDepth, bMotionVectors);
 }
 
@@ -416,17 +416,17 @@ void UCameraCaptureSubsystem::SetDmvMaterial(UMaterial* Material)
 		UE_LOG(LogTemp, Warning, TEXT("[CameraCaptureSubsystem] SetDmvMaterial called with null material"));
 		return;
 	}
-	
+
 	DmvCaptureMaterialBase = Material;
 	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Set DMV material: %s"), *Material->GetName());
-	
+
 	// If we already have registered cameras, set up their DMV cameras now
 	for (const TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D>& WeakCamera : RegisteredCameras)
 	{
 		if (WeakCamera.IsValid())
 		{
 			UIntrinsicSceneCaptureComponent2D* Camera = WeakCamera.Get();
-			
+
 			// Only set up if not already set up
 			if (!DmvCameras.Contains(Camera))
 			{
@@ -489,12 +489,12 @@ void UCameraCaptureSubsystem::ExecuteSynchronizedCapture()
 	}
 
 	TotalFramesCaptured += CapturedCount;
-    FrameIdCounter++;
+	FrameIdCounter++;
 
 	// Update statistics
 	double EndTime = FPlatformTime::Seconds();
 	LastCaptureDurationMs = (EndTime - StartTime) * 1000.0f;
-	
+
 	// Running average
 	if (AverageCaptureTimeMs == 0.0f)
 	{
@@ -505,7 +505,7 @@ void UCameraCaptureSubsystem::ExecuteSynchronizedCapture()
 		AverageCaptureTimeMs = AverageCaptureTimeMs * 0.9f + LastCaptureDurationMs * 0.1f;
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Captured %d/%d cameras successfully, %d failed (%.2fms)"), 
+	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Captured %d/%d cameras successfully, %d failed (%.2fms)"),
 		CapturedCount, RegisteredCameras.Num(), FailedCount, LastCaptureDurationMs);
 
 	if (CapturedCount > 0)
@@ -553,7 +553,7 @@ bool UCameraCaptureSubsystem::CaptureCameraData(UIntrinsicSceneCaptureComponent2
 	{
 		OutData.ActorPath = Owner->GetPathName();
 	}
-	
+
 	UWorld* World = GetWorld();
 	if (World)
 	{
@@ -562,8 +562,8 @@ bool UCameraCaptureSubsystem::CaptureCameraData(UIntrinsicSceneCaptureComponent2
 
 	// Get intrinsics for render target creation
 	FCameraIntrinsics Intrinsics = Camera->GetActiveIntrinsics();
-	int32 Width = Intrinsics.ImageWidth;
-	int32 Height = Intrinsics.ImageHeight;
+	int32			  Width = Intrinsics.ImageWidth;
+	int32			  Height = Intrinsics.ImageHeight;
 
 	// Ensure camera has a render target for RGB
 	if (!Camera->TextureTarget)
@@ -572,9 +572,9 @@ bool UCameraCaptureSubsystem::CaptureCameraData(UIntrinsicSceneCaptureComponent2
 		NewRenderTarget->RenderTargetFormat = RTF_RGBA8;
 		NewRenderTarget->InitAutoFormat(Width, Height);
 		NewRenderTarget->UpdateResourceImmediate(true);
-		
+
 		Camera->TextureTarget = NewRenderTarget;
-		
+
 		UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Created dynamic RGB render target (%dx%d) for camera %s"),
 			Width, Height, *CameraID->ToString());
 	}
@@ -610,36 +610,36 @@ bool UCameraCaptureSubsystem::CaptureCameraData(UIntrinsicSceneCaptureComponent2
 	{
 		// Look up the DMV camera we created during registration
 		TWeakObjectPtr<USceneCaptureComponent2D>* DmvCameraPtr = DmvCameras.Find(Camera);
-		
+
 		if (DmvCameraPtr && DmvCameraPtr->IsValid())
 		{
 			USceneCaptureComponent2D* DmvCamera = DmvCameraPtr->Get();
-			
+
 			// Capture depth+motion
 			DmvCamera->CaptureScene();
-			
+
 			UTextureRenderTarget2D* DmvRT = DmvCamera->TextureTarget;
 			if (DmvRT)
 			{
 				FTextureRenderTargetResource* DmvResource = DmvRT->GameThread_GetRenderTargetResource();
-				
+
 				if (DmvResource)
 				{
 					TArray<FLinearColor> DmvPixels;
 					DmvPixels.SetNum(Width * Height);
-					
+
 					if (DmvResource->ReadLinearColorPixels(DmvPixels))
 					{
 						OutData.DepthData.SetNum(Width * Height);
 						OutData.MotionVectorData.SetNum(Width * Height);
-						
+
 						// Decode: R=Depth (cm), G=MotionX (px/frame), B=MotionY (px/frame), A=1
 						for (int32 i = 0; i < DmvPixels.Num(); i++)
 						{
 							OutData.DepthData[i] = DmvPixels[i].R;
 							OutData.MotionVectorData[i] = FVector2D(DmvPixels[i].G, DmvPixels[i].B);
 						}
-						
+
 						UE_LOG(LogTemp, Verbose, TEXT("[CameraCaptureSubsystem] Captured depth+motion from DMV camera for %s"), *CameraID->ToString());
 					}
 					else
@@ -669,7 +669,7 @@ void UCameraCaptureSubsystem::SerializeCaptureData(const FCaptureData& Data)
 	{
 		AbsoluteOutputDir = FPaths::Combine(*FPaths::ProjectDir(), *OutputDirectory);
 	}
-	
+
 	// Create directory structure: OutputDir/ActorName/CameraName/
 	FString CameraPath = Data.CameraID.GetFullPath(AbsoluteOutputDir);
 
@@ -684,7 +684,7 @@ void UCameraCaptureSubsystem::SerializeCaptureData(const FCaptureData& Data)
 			return;
 		}
 	}
-	
+
 	// Verify directory was created
 	if (!IFileManager::Get().DirectoryExists(*CameraPath))
 	{
@@ -694,12 +694,12 @@ void UCameraCaptureSubsystem::SerializeCaptureData(const FCaptureData& Data)
 
 	// Generate frame filename (frame_0000000.exr)
 	FString FrameNumberStr = FString::Printf(TEXT("%07lld"), Data.FrameNumber);
-	
+
 	// Write EXR file with all channels (use absolute path)
 	FString ExrPath = FPaths::Combine(CameraPath, FString::Printf(TEXT("frame_%s.exr"), *FrameNumberStr));
-	
+
 	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Writing EXR: %s"), *ExrPath);
-	
+
 	bool bSuccess = WriteEXRFile(ExrPath, Data);
 
 	if (!bSuccess)
@@ -707,7 +707,7 @@ void UCameraCaptureSubsystem::SerializeCaptureData(const FCaptureData& Data)
 		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Failed to write EXR: %s"), *ExrPath);
 		return;
 	}
-	
+
 	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Submitted EXR write task: %s"), *ExrPath);
 
 	// Write metadata JSON (separate from EXR for easy access)
@@ -723,19 +723,19 @@ bool UCameraCaptureSubsystem::WriteEXRFile(const FString& FilePath, const FCaptu
 		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Invalid image dimensions: %dx%d"), Data.Width, Data.Height);
 		return false;
 	}
-	
+
 	int32 NumPixels = Data.Width * Data.Height;
-	
+
 	if (Data.ImageData.Num() == 0)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[CameraCaptureSubsystem] No image data to write"));
 		return false;
 	}
-	
+
 	// Prepare multi-channel pixel data for RGBA (RGB + Depth in Alpha)
 	TArray64<FLinearColor> PixelData;
 	PixelData.SetNum(NumPixels);
-	
+
 	// Convert RGB from FColor (0-255) to FLinearColor (0-1)
 	if (bCaptureRGB && Data.ImageData.Num() == NumPixels)
 	{
@@ -752,7 +752,7 @@ bool UCameraCaptureSubsystem::WriteEXRFile(const FString& FilePath, const FCaptu
 			PixelData[i] = FLinearColor::Black;
 		}
 	}
-	
+
 	// Store depth in Alpha channel
 	if (bCaptureDepth && Data.DepthData.Num() == NumPixels)
 	{
@@ -763,24 +763,24 @@ bool UCameraCaptureSubsystem::WriteEXRFile(const FString& FilePath, const FCaptu
 			PixelData[i].A = NormalizedDepth;
 		}
 	}
-	
+
 	// Store motion vectors separately if we have them
 	TArray<float> MotionXData;
 	TArray<float> MotionYData;
-	bool bHasMotion = bCaptureMotionVectors && Data.MotionVectorData.Num() == NumPixels;
-	
+	bool		  bHasMotion = bCaptureMotionVectors && Data.MotionVectorData.Num() == NumPixels;
+
 	if (bHasMotion)
 	{
 		MotionXData.SetNum(NumPixels);
 		MotionYData.SetNum(NumPixels);
-		
+
 		for (int32 i = 0; i < NumPixels; i++)
 		{
 			MotionXData[i] = Data.MotionVectorData[i].X;
 			MotionYData[i] = Data.MotionVectorData[i].Y;
 		}
 	}
-	
+
 	// Create image write task for base RGBA channels
 	TUniquePtr<FImageWriteTask> ImageTask = MakeUnique<FImageWriteTask>();
 	ImageTask->PixelData = MakeUnique<TImagePixelData<FLinearColor>>(FIntPoint(Data.Width, Data.Height), MoveTemp(PixelData));
@@ -788,10 +788,9 @@ bool UCameraCaptureSubsystem::WriteEXRFile(const FString& FilePath, const FCaptu
 	ImageTask->Format = EImageFormat::EXR;
 	ImageTask->CompressionQuality = (int32)EImageCompressionQuality::Default;
 	ImageTask->bOverwriteFile = true;
-	
+
 	// Add completion callback
-	ImageTask->OnCompleted = [FilePath](bool bSuccess)
-	{
+	ImageTask->OnCompleted = [FilePath](bool bSuccess) {
 		if (bSuccess)
 		{
 			UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] ✓ EXR write complete: %s"), *FilePath);
@@ -801,7 +800,7 @@ bool UCameraCaptureSubsystem::WriteEXRFile(const FString& FilePath, const FCaptu
 			UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] ✗ EXR write FAILED: %s"), *FilePath);
 		}
 	};
-	
+
 	// Get the image write queue module
 	IImageWriteQueueModule* ImageWriteQueueModule = FModuleManager::Get().GetModulePtr<IImageWriteQueueModule>("ImageWriteQueue");
 	if (!ImageWriteQueueModule)
@@ -809,28 +808,27 @@ bool UCameraCaptureSubsystem::WriteEXRFile(const FString& FilePath, const FCaptu
 		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Failed to get ImageWriteQueue module"));
 		return false;
 	}
-	
+
 	// Submit main EXR task
 	ImageWriteQueueModule->GetWriteQueue().Enqueue(MoveTemp(ImageTask));
-	
+
 	// If we have motion vectors, write them to a separate file asynchronously
 	if (bHasMotion)
 	{
 		const FString MotionPath = FilePath.Replace(TEXT(".exr"), TEXT("_motion.exr"));
-		const int32 Width = Data.Width;
-		const int32 Height = Data.Height;
-		
-		AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [MotionPath, Width, Height, MotionXData, MotionYData]()
-		{
+		const int32	  Width = Data.Width;
+		const int32	  Height = Data.Height;
+
+		AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [MotionPath, Width, Height, MotionXData, MotionYData]() {
 			// Create motion image with X in R channel, Y in G channel
 			TArray64<FLinearColor> MotionPixels;
 			MotionPixels.SetNum(Width * Height);
-			
+
 			for (int32 i = 0; i < Width * Height; i++)
 			{
 				MotionPixels[i] = FLinearColor(MotionXData[i], MotionYData[i], 0.0f, 0.0f);
 			}
-			
+
 			// Write motion EXR
 			TUniquePtr<FImageWriteTask> MotionTask = MakeUnique<FImageWriteTask>();
 			MotionTask->PixelData = MakeUnique<TImagePixelData<FLinearColor>>(FIntPoint(Width, Height), MoveTemp(MotionPixels));
@@ -838,15 +836,14 @@ bool UCameraCaptureSubsystem::WriteEXRFile(const FString& FilePath, const FCaptu
 			MotionTask->Format = EImageFormat::EXR;
 			MotionTask->CompressionQuality = (int32)EImageCompressionQuality::Default;
 			MotionTask->bOverwriteFile = true;
-			
-			MotionTask->OnCompleted = [MotionPath](bool bSuccess)
-			{
+
+			MotionTask->OnCompleted = [MotionPath](bool bSuccess) {
 				if (bSuccess)
 				{
 					UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] ✓ Motion EXR write complete: %s"), *MotionPath);
 				}
 			};
-			
+
 			IImageWriteQueueModule* MotionWriteModule = FModuleManager::Get().GetModulePtr<IImageWriteQueueModule>("ImageWriteQueue");
 			if (MotionWriteModule)
 			{
@@ -854,7 +851,7 @@ bool UCameraCaptureSubsystem::WriteEXRFile(const FString& FilePath, const FCaptu
 			}
 		});
 	}
-	
+
 	return true;
 }
 
@@ -869,9 +866,9 @@ bool UCameraCaptureSubsystem::WriteMetadataFile(const FString& FilePath, const F
 
 	// World transform
 	TSharedPtr<FJsonObject> TransformJson = MakeShared<FJsonObject>();
-	FVector Location = Data.WorldTransform.GetLocation();
-	FRotator Rotation = Data.WorldTransform.Rotator();
-	FVector Scale = Data.WorldTransform.GetScale3D();
+	FVector					Location = Data.WorldTransform.GetLocation();
+	FRotator				Rotation = Data.WorldTransform.Rotator();
+	FVector					Scale = Data.WorldTransform.GetScale3D();
 
 	TArray<TSharedPtr<FJsonValue>> LocationArray;
 	LocationArray.Add(MakeShared<FJsonValueNumber>(Location.X));
@@ -908,7 +905,7 @@ bool UCameraCaptureSubsystem::WriteMetadataFile(const FString& FilePath, const F
 	JsonObject->SetStringField(TEXT("level_name"), Data.LevelName);
 
 	// Serialize to string
-	FString OutputString;
+	FString					  OutputString;
 	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutputString);
 	FJsonSerializer::Serialize(JsonObject.ToSharedRef(), Writer);
 
@@ -936,7 +933,7 @@ FCameraIdentifier UCameraCaptureSubsystem::GenerateCameraID(UIntrinsicSceneCaptu
 	// Multiple cameras can be on the same actor, so only disambiguate if there's
 	// an actual component name collision on the same actor
 	FString ProposedUniqueID = FString::Printf(TEXT("%s::%s"), *ID.ActorName, *ID.ComponentName);
-	
+
 	// Check if this unique ID already exists
 	bool bNeedsDisambiguation = false;
 	for (const auto& Pair : CameraIDMap)
@@ -948,7 +945,7 @@ FCameraIdentifier UCameraCaptureSubsystem::GenerateCameraID(UIntrinsicSceneCaptu
 			break;
 		}
 	}
-	
+
 	if (bNeedsDisambiguation)
 	{
 		// Disambiguate the actor name
@@ -967,14 +964,14 @@ FCameraIdentifier UCameraCaptureSubsystem::GenerateCameraID(UIntrinsicSceneCaptu
 FString UCameraCaptureSubsystem::DisambiguateActorName(const FString& ActorName)
 {
 	// Find a unique suffix
-	int32 Suffix = 1;
+	int32	Suffix = 1;
 	FString DisambiguatedName;
-	
+
 	do
 	{
 		DisambiguatedName = FString::Printf(TEXT("%s_%d"), *ActorName, Suffix);
 		Suffix++;
-		
+
 		// Check if this disambiguated name is already in use
 		bool bInUse = false;
 		for (const auto& Pair : CameraIDMap)
@@ -985,13 +982,13 @@ FString UCameraCaptureSubsystem::DisambiguateActorName(const FString& ActorName)
 				break;
 			}
 		}
-		
+
 		if (!bInUse)
 		{
 			break;
 		}
-		
-	} while (Suffix < 100); // Safety limit
+	}
+	while (Suffix < 100); // Safety limit
 
 	UE_LOG(LogTemp, Warning, TEXT("[CameraCaptureSubsystem] Actor/component name collision detected, using: %s"), *DisambiguatedName);
 

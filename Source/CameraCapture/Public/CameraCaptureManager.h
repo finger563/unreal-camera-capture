@@ -15,7 +15,7 @@ enum class ECameraRegistrationMode : uint8
 {
 	/** Capture all IntrinsicSceneCaptureComponent2D cameras found in the level */
 	AllInLevel UMETA(DisplayName = "All In Level"),
-	
+
 	/** Only capture cameras explicitly added to the CamerasToCapture array */
 	Manual UMETA(DisplayName = "Manual Selection")
 };

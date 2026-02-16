@@ -7,10 +7,10 @@
 ACameraCaptureManager::ACameraCaptureManager()
 {
 	PrimaryActorTick.bCanEverTick = false;
-	
+
 	// Make this actor visible in editor
 	bIsEditorOnlyActor = false;
-	
+
 #if WITH_EDITORONLY_DATA
 	bListedInSceneOutliner = true;
 #endif
@@ -19,12 +19,12 @@ ACameraCaptureManager::ACameraCaptureManager()
 void ACameraCaptureManager::BeginPlay()
 {
 	Super::BeginPlay();
-	
+
 	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureManager] BeginPlay started"));
-	
+
 	// Check for multiple managers (warn if found)
 	CheckForMultipleManagers();
-	
+
 	// Get subsystem
 	CachedSubsystem = GetCaptureSubsystem();
 	if (!CachedSubsystem)
@@ -32,30 +32,30 @@ void ACameraCaptureManager::BeginPlay()
 		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureManager] Failed to get CameraCaptureSubsystem"));
 		return;
 	}
-	
+
 	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureManager] Got subsystem, configuring..."));
-	
+
 	// Configure subsystem
 	CachedSubsystem->SetOutputDirectory(OutputDirectory);
 	CachedSubsystem->SetCaptureRate(CaptureEveryNFrames);
 	CachedSubsystem->SetCaptureChannels(bCaptureRGB, bCaptureDepth, bCaptureMotionVectors);
-	
+
 	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureManager] Configuration complete, registering cameras..."));
-	
+
 	// Register cameras
 	RegisterCameras();
-	
+
 	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureManager] Cameras registered"));
-	
+
 	bInitialized = true;
-	
+
 	// Auto-start if configured
 	if (bAutoStartOnBeginPlay)
 	{
 		UE_LOG(LogTemp, Log, TEXT("[CameraCaptureManager] Auto-starting capture..."));
 		StartCapture();
 	}
-	
+
 	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureManager] Initialized with %d cameras"), GetRegisteredCameraCount());
 }
 
@@ -66,13 +66,13 @@ void ACameraCaptureManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		StopCapture();
 	}
-	
+
 	// Unregister cameras
 	UnregisterAllCameras();
-	
+
 	CachedSubsystem = nullptr;
 	bInitialized = false;
-	
+
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -80,17 +80,17 @@ void ACameraCaptureManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 void ACameraCaptureManager::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
-	
+
 	if (!bInitialized || !CachedSubsystem)
 	{
 		return;
 	}
-	
+
 	// Update subsystem configuration when properties change
 	if (PropertyChangedEvent.MemberProperty)
 	{
 		FName PropertyName = PropertyChangedEvent.MemberProperty->GetFName();
-		
+
 		if (PropertyName == GET_MEMBER_NAME_CHECKED(ACameraCaptureManager, OutputDirectory))
 		{
 			CachedSubsystem->SetOutputDirectory(OutputDirectory);
@@ -99,14 +99,11 @@ void ACameraCaptureManager::PostEditChangeProperty(FPropertyChangedEvent& Proper
 		{
 			CachedSubsystem->SetCaptureRate(CaptureEveryNFrames);
 		}
-		else if (PropertyName == GET_MEMBER_NAME_CHECKED(ACameraCaptureManager, bCaptureRGB) ||
-				 PropertyName == GET_MEMBER_NAME_CHECKED(ACameraCaptureManager, bCaptureDepth) ||
-				 PropertyName == GET_MEMBER_NAME_CHECKED(ACameraCaptureManager, bCaptureMotionVectors))
+		else if (PropertyName == GET_MEMBER_NAME_CHECKED(ACameraCaptureManager, bCaptureRGB) || PropertyName == GET_MEMBER_NAME_CHECKED(ACameraCaptureManager, bCaptureDepth) || PropertyName == GET_MEMBER_NAME_CHECKED(ACameraCaptureManager, bCaptureMotionVectors))
 		{
 			CachedSubsystem->SetCaptureChannels(bCaptureRGB, bCaptureDepth, bCaptureMotionVectors);
 		}
-		else if (PropertyName == GET_MEMBER_NAME_CHECKED(ACameraCaptureManager, RegistrationMode) ||
-				 PropertyName == GET_MEMBER_NAME_CHECKED(ACameraCaptureManager, CamerasToCapture))
+		else if (PropertyName == GET_MEMBER_NAME_CHECKED(ACameraCaptureManager, RegistrationMode) || PropertyName == GET_MEMBER_NAME_CHECKED(ACameraCaptureManager, CamerasToCapture))
 		{
 			// Re-register cameras when mode or list changes
 			UnregisterAllCameras();
@@ -183,9 +180,9 @@ void ACameraCaptureManager::RegisterCameras()
 	{
 		return;
 	}
-	
+
 	TArray<UIntrinsicSceneCaptureComponent2D*> CamerasToRegister;
-	
+
 	switch (RegistrationMode)
 	{
 		case ECameraRegistrationMode::AllInLevel:
@@ -195,7 +192,7 @@ void ACameraCaptureManager::RegisterCameras()
 			UE_LOG(LogTemp, Log, TEXT("[CameraCaptureManager] AllInLevel mode: Found %d cameras"), CamerasToRegister.Num());
 			break;
 		}
-		
+
 		case ECameraRegistrationMode::Manual:
 		{
 			// Use explicit list
@@ -204,7 +201,7 @@ void ACameraCaptureManager::RegisterCameras()
 			break;
 		}
 	}
-	
+
 	// Register each camera
 	for (UIntrinsicSceneCaptureComponent2D* Camera : CamerasToRegister)
 	{
@@ -213,7 +210,7 @@ void ACameraCaptureManager::RegisterCameras()
 			Subsystem->RegisterCamera(Camera);
 		}
 	}
-	
+
 	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureManager] Registered %d cameras"), CamerasToRegister.Num());
 }
 
@@ -224,7 +221,7 @@ void ACameraCaptureManager::UnregisterAllCameras()
 	{
 		return;
 	}
-	
+
 	// Get all registered cameras and unregister them
 	TArray<UIntrinsicSceneCaptureComponent2D*> RegisteredCameras = Subsystem->GetRegisteredCameras();
 	for (UIntrinsicSceneCaptureComponent2D* Camera : RegisteredCameras)
@@ -239,17 +236,17 @@ void ACameraCaptureManager::UnregisterAllCameras()
 TArray<UIntrinsicSceneCaptureComponent2D*> ACameraCaptureManager::FindAllCamerasInLevel() const
 {
 	TArray<UIntrinsicSceneCaptureComponent2D*> FoundCameras;
-	
+
 	UWorld* World = GetWorld();
 	if (!World)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[CameraCaptureManager] FindAllCamerasInLevel: No world"));
 		return FoundCameras;
 	}
-	
+
 	int32 TotalActorsChecked = 0;
 	int32 TotalCameraComponentsFound = 0;
-	
+
 	// Iterate all actors in world
 	for (TActorIterator<AActor> It(World); It; ++It)
 	{
@@ -258,29 +255,29 @@ TArray<UIntrinsicSceneCaptureComponent2D*> ACameraCaptureManager::FindAllCameras
 		{
 			continue;
 		}
-		
+
 		TotalActorsChecked++;
-		
+
 		// Find all IntrinsicSceneCaptureComponent2D components on this actor
 		TArray<UIntrinsicSceneCaptureComponent2D*> CameraComponents;
 		Actor->GetComponents<UIntrinsicSceneCaptureComponent2D>(CameraComponents);
-		
+
 		for (UIntrinsicSceneCaptureComponent2D* Camera : CameraComponents)
 		{
 			if (Camera)
 			{
 				TotalCameraComponentsFound++;
 				FoundCameras.Add(Camera);
-				
-				UE_LOG(LogTemp, Log, TEXT("[CameraCaptureManager] Found camera: %s on actor: %s"), 
+
+				UE_LOG(LogTemp, Log, TEXT("[CameraCaptureManager] Found camera: %s on actor: %s"),
 					*Camera->GetName(), *Actor->GetName());
 			}
 		}
 	}
-	
-	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureManager] Search complete: %d actors checked, %d camera components found"), 
+
+	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureManager] Search complete: %d actors checked, %d camera components found"),
 		TotalActorsChecked, TotalCameraComponentsFound);
-	
+
 	return FoundCameras;
 }
 
@@ -294,13 +291,13 @@ UCameraCaptureSubsystem* ACameraCaptureManager::GetCaptureSubsystem() const
 	{
 		return CachedSubsystem;
 	}
-	
+
 	UWorld* World = GetWorld();
 	if (World)
 	{
 		return World->GetSubsystem<UCameraCaptureSubsystem>();
 	}
-	
+
 	return nullptr;
 }
 
@@ -311,13 +308,13 @@ void ACameraCaptureManager::CheckForMultipleManagers()
 	{
 		return;
 	}
-	
+
 	int32 ManagerCount = 0;
 	for (TActorIterator<ACameraCaptureManager> It(World); It; ++It)
 	{
 		ManagerCount++;
 	}
-	
+
 	if (ManagerCount > 1)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[CameraCaptureManager] Multiple CameraCaptureManager actors found in level (%d). Only one manager per level is recommended."), ManagerCount);

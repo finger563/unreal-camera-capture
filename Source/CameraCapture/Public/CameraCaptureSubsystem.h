@@ -164,12 +164,12 @@ public:
 	virtual void Deinitialize() override;
 
 	// FTickableGameObject interface
-	virtual void Tick(float DeltaTime) override;
-	virtual TStatId GetStatId() const override;
-	virtual bool IsTickable() const override;
-	virtual bool IsTickableInEditor() const override { return false; }
+	virtual void			  Tick(float DeltaTime) override;
+	virtual TStatId			  GetStatId() const override;
+	virtual bool			  IsTickable() const override;
+	virtual bool			  IsTickableInEditor() const override { return false; }
 	virtual ETickableTickType GetTickableTickType() const override { return ETickableTickType::Always; }
-	virtual void OnWorldBeginPlay(UWorld& InWorld) override;
+	virtual void			  OnWorldBeginPlay(UWorld& InWorld) override;
 
 	// ============================================================================
 	// Camera Registration
@@ -283,8 +283,8 @@ private:
 	/** Current frame counter */
 	int32 CurrentFrameCounter = 0;
 
-    /** Unique frame ID counter for naming files */
-    int64 FrameIdCounter = 0;
+	/** Unique frame ID counter for naming files */
+	int64 FrameIdCounter = 0;
 
 	/** Total frames captured this session */
 	int64 TotalFramesCaptured = 0;

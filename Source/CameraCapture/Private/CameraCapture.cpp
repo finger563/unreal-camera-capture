@@ -21,5 +21,5 @@ void FCameraCaptureModule::ShutdownModule()
 }
 
 #undef LOCTEXT_NAMESPACE
-	
+
 IMPLEMENT_MODULE(FCameraCaptureModule, CameraCapture)
