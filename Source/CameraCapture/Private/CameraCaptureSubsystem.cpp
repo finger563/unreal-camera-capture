@@ -73,7 +73,7 @@ void UCameraCaptureSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	
 	// Load M_DmvCapture material from plugin Content folder
 	// This is the same path used by CaptureComponent
-	FString MaterialPath = TEXT("/Script/Engine.Material'/CameraCapture/M_DmvCapture.M_DmvCapture'");
+	FString MaterialPath = TEXT("/Script/Engine.Material'/CameraCapture/Materials/M_DmvCapture.M_DmvCapture'");
 	DmvCaptureMaterialBase = Cast<UMaterial>(StaticLoadObject(UMaterial::StaticClass(), nullptr, *MaterialPath));
 	
 	if (!DmvCaptureMaterialBase)

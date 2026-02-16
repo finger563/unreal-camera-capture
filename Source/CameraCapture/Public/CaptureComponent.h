@@ -47,7 +47,7 @@ public:
 
     // Get this path by right clicking on the asset in UE content browser and
     // selecting "Copy Reference"
-    FString MaterialPath = "/Script/Engine.Material'/CameraCapture/M_DmvCapture.M_DmvCapture'";
+    FString MaterialPath = "/Script/Engine.Material'/CameraCapture/Materials/M_DmvCapture.M_DmvCapture'";
 
     // Material base that will be used to render the DMV data - it should render
     // the depth data into the red channel, the motion vector into the green and
