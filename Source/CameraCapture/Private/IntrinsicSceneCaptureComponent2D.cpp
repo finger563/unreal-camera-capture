@@ -254,8 +254,9 @@ void UIntrinsicSceneCaptureComponent2D::DrawCameraFrustum()
 	// Determine if we're in editor mode
 	bool bIsEditorWorld = GIsEditor && !World->IsGameWorld();
 	
-	// Get the camera's world transform
+	// Get the camera's world transform (ignore scale for frustum drawing)
 	FTransform CameraTransform = GetComponentTransform();
+	CameraTransform.SetScale3D(FVector::OneVector); // Always use scale of 1.0 for frustum
 	FVector CameraLocation = CameraTransform.GetLocation();
 	FRotator CameraRotation = CameraTransform.Rotator();
 

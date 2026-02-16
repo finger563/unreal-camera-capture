@@ -66,7 +66,7 @@ public:
 
 	/** Thickness of frustum lines */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (EditCondition = "bDrawFrustumInGame | bDrawFrustumInEditor", ClampMin = "0.0", DisplayName = "Frustum Line Thickness", ToolTip = "Thickness of the frustum visualization lines"))
-	float FrustumLineThickness = 2.0f;
+	float FrustumLineThickness = 0.2f;
 
 	/** Whether to draw frustum planes (filled quads) for overlap visualization */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (EditCondition = "bDrawFrustumInGame | bDrawFrustumInEditor", DisplayName = "Draw Frustum Planes", ToolTip = "Draw filled frustum planes to help visualize overlap."))
@@ -74,7 +74,7 @@ public:
 
 	/** Color of the frustum planes (alpha supported) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (EditCondition = "bDrawFrustumInGame | bDrawFrustumInEditor", DisplayName = "Frustum Plane Color", ToolTip = "Color of the frustum planes (alpha supported)."))
-	FLinearColor FrustumPlaneColor = FLinearColor(1.0f, 1.0f, 0.0f, 0.15f);
+	FLinearColor FrustumPlaneColor = FLinearColor(1.0f, 1.0f, 0.0f, 0.03f);
 
 	/** Custom metadata to include in capture output (managed by CameraCaptureManager) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (DisplayName = "Custom Metadata", ToolTip = "Additional key-value metadata to include in capture JSON"))
