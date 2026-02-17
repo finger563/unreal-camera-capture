@@ -20,8 +20,8 @@ UIntrinsicSceneCaptureComponent2D::UIntrinsicSceneCaptureComponent2D()
 	bTickInEditor = true;
 #endif
 
-    // ensure we use the newer form of render scene primitives (not legacy)
-    PrimitiveRenderMode = ESceneCapturePrimitiveRenderMode::PRM_RenderScenePrimitives;
+	// ensure we use the newer form of render scene primitives (not legacy)
+	PrimitiveRenderMode = ESceneCapturePrimitiveRenderMode::PRM_RenderScenePrimitives;
 
 	// We control capture timing via CaptureComponent, so disable auto-capture
 	bCaptureEveryFrame = false;
@@ -173,8 +173,11 @@ void UIntrinsicSceneCaptureComponent2D::ApplyIntrinsics()
 	if (Intrinsics.bMaintainYAxis)
 	{
 		// Adjust FOV to maintain Y-axis (vertical FOV) like gameplay camera
-		float AspectRatio = static_cast<float>(Intrinsics.ImageWidth) / static_cast<float>(Intrinsics.ImageHeight);
-
+		float AspectRatio = 1.777f; // Default 16:9
+		if (Intrinsics.ImageHeight > 0)
+		{
+			AspectRatio = static_cast<float>(Intrinsics.ImageWidth) / static_cast<float>(Intrinsics.ImageHeight);
+		}
 		// Assume the current FOV is for a 16:9 aspect ratio (standard)
 		float ReferenceAspect = 16.0f / 9.0f;
 
@@ -271,14 +274,17 @@ void UIntrinsicSceneCaptureComponent2D::DrawCameraFrustum()
 	{
 		// Use FOV-based projection
 		float AspectRatio = 1.777f; // Default 16:9
-		if (TextureTarget)
+		if (TextureTarget && TextureTarget->SizeY > 0)
 		{
 			AspectRatio = static_cast<float>(TextureTarget->SizeX) / static_cast<float>(TextureTarget->SizeY);
 		}
 		else if (bUseCustomIntrinsics)
 		{
 			FCameraIntrinsics Intrinsics = GetActiveIntrinsics();
-			AspectRatio = static_cast<float>(Intrinsics.ImageWidth) / static_cast<float>(Intrinsics.ImageHeight);
+			if (Intrinsics.ImageHeight > 0)
+			{
+				AspectRatio = static_cast<float>(Intrinsics.ImageWidth) / static_cast<float>(Intrinsics.ImageHeight);
+			}
 		}
 
 		// Build standard perspective projection from FOV
@@ -305,7 +311,7 @@ void UIntrinsicSceneCaptureComponent2D::DrawCameraFrustum()
 		FrustumPlaneColor);
 
 	// Optionally draw a small cross at the camera origin for reference
-	FVector CameraLocation = CameraTransform.GetLocation();
+	FVector	 CameraLocation = CameraTransform.GetLocation();
 	FRotator CameraRotation = CameraTransform.Rotator();
 	DrawDebugCrosshairs(World, CameraLocation, CameraRotation, 10.0f, FrustumColor, false, 0.0f, 0);
 }
