@@ -31,6 +31,20 @@ Provides:
 - A `M_DmvCapture` material for saving depth + motion vectors to a single
   texture (used by both capture systems)
 
+<!-- markdown-toc start - Don't edit this section. Run M-x markdown-toc-refresh-toc -->
+**Table of Contents**
+
+- [Camera Capture Plugin for UE 5](#camera-capture-plugin-for-ue-5)
+  - [Usage](#usage)
+  - [Camera Intrinsics](#camera-intrinsics)
+  - [Data Collected](#data-collected)
+  - [Developing](#developing)
+    - [Code style](#code-style)
+  - [References](#references)
+
+<!-- markdown-toc end -->
+
+
 ## Usage
 
 ### Option 1: Using CaptureComponent (Per-Actor)
@@ -216,6 +230,24 @@ depth = img[:, :, 3]
 An example visualization of captured data:
 
 ![example](https://github.com/finger563/unreal-camera-capture/assets/213467/dc91ba5a-21bc-47c5-92cd-5b09414c6420)
+
+## Developing
+
+If you want to contribute or customize the plugin, you can clone the repository
+and set it up in your Unreal project. If you want to make changes to the code,
+please follow the code style guidelines below.
+
+### Code style
+
+1. Ensure `clang-format` is installed
+2. Ensure [pre-commit](https://pre-commit.com) is installed
+3. Set up `pre-commit` for this repository:
+
+  ``` console
+  pre-commit install
+  ```
+
+This helps ensure that consistent code formatting is applied.
 
 ## References
 
