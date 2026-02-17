@@ -116,10 +116,6 @@ struct CAMERACAPTURE_API FCaptureData
 	/** Level name */
 	UPROPERTY(BlueprintReadOnly, Category = "Capture Data")
 	FString LevelName;
-
-	/** Extensible custom metadata */
-	UPROPERTY(BlueprintReadOnly, Category = "Capture Data")
-	TMap<FString, FString> CustomMetadata;
 };
 
 /**

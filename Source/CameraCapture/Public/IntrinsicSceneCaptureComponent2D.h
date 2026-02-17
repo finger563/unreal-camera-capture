@@ -76,12 +76,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug Visualization", meta = (EditCondition = "bDrawFrustumInGame | bDrawFrustumInEditor", DisplayName = "Frustum Plane Color", ToolTip = "Color of the frustum planes (alpha supported)."))
 	FLinearColor FrustumPlaneColor = FLinearColor(1.0f, 1.0f, 0.0f, 0.03f);
 
-	/** Custom metadata to include in capture output (managed by CameraCaptureManager) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (DisplayName = "Custom Metadata", ToolTip = "Additional key-value metadata to include in capture JSON"))
-	TMap<FString, FString> CustomMetadata;
-
 protected:
 	virtual void BeginPlay() override;
+	virtual void BeginDestroy() override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 	/** Draw the camera frustum for visualization */

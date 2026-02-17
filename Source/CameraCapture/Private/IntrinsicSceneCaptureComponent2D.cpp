@@ -10,7 +10,9 @@
 UIntrinsicSceneCaptureComponent2D::UIntrinsicSceneCaptureComponent2D()
 {
 	PrimaryComponentTick.bCanEverTick = true;
-	PrimaryComponentTick.TickGroup = TG_DuringPhysics;
+	// Tick after physics to ensure frustum visualization is up to date with any
+	// physics-driven movement
+	PrimaryComponentTick.TickGroup = TG_PostPhysics;
 
 #if WITH_EDITORONLY_DATA
 	// Enable ticking in editor for frustum visualization
@@ -32,6 +34,18 @@ void UIntrinsicSceneCaptureComponent2D::BeginPlay()
 	{
 		ApplyIntrinsics();
 	}
+}
+
+void UIntrinsicSceneCaptureComponent2D::BeginDestroy()
+{
+	// Unregister delegate
+	if (OnObjectPropertyChangedHandle.IsValid())
+	{
+		FCoreUObjectDelegates::OnObjectPropertyChanged.Remove(OnObjectPropertyChangedHandle);
+		OnObjectPropertyChangedHandle.Reset();
+	}
+
+	Super::BeginDestroy();
 }
 
 void UIntrinsicSceneCaptureComponent2D::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
