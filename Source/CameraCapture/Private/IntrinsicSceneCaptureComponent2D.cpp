@@ -1,9 +1,28 @@
 #include "IntrinsicSceneCaptureComponent2D.h"
+#include "CameraCaptureSubsystem.h"
+#include "Utilities.h"
+#include "DrawDebugHelpers.h"
+#include "Engine/World.h"
+
+#if WITH_EDITOR
+	#include "UObject/UObjectGlobals.h"
+#endif
 
 UIntrinsicSceneCaptureComponent2D::UIntrinsicSceneCaptureComponent2D()
 {
-	PrimaryComponentTick.bCanEverTick = false;
-	
+	PrimaryComponentTick.bCanEverTick = true;
+	// Tick after physics to ensure frustum visualization is up to date with any
+	// physics-driven movement
+	PrimaryComponentTick.TickGroup = TG_PostPhysics;
+
+#if WITH_EDITORONLY_DATA
+	// Enable ticking in editor for frustum visualization
+	bTickInEditor = true;
+#endif
+
+	// ensure we use the newer form of render scene primitives (not legacy)
+	PrimitiveRenderMode = ESceneCapturePrimitiveRenderMode::PRM_RenderScenePrimitives;
+
 	// We control capture timing via CaptureComponent, so disable auto-capture
 	bCaptureEveryFrame = false;
 	bCaptureOnMovement = false;
@@ -21,6 +40,37 @@ void UIntrinsicSceneCaptureComponent2D::BeginPlay()
 	}
 }
 
+void UIntrinsicSceneCaptureComponent2D::BeginDestroy()
+{
+	// Unregister delegate
+	if (OnObjectPropertyChangedHandle.IsValid())
+	{
+		FCoreUObjectDelegates::OnObjectPropertyChanged.Remove(OnObjectPropertyChangedHandle);
+		OnObjectPropertyChangedHandle.Reset();
+	}
+
+	Super::BeginDestroy();
+}
+
+void UIntrinsicSceneCaptureComponent2D::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
+{
+	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+
+	// Drew frustum in-game if enabled
+	if (bDrawFrustumInGame)
+	{
+		DrawCameraFrustum();
+	}
+
+	// Draw frustum in-editor if enabled, but not when PIE is active
+#if WITH_EDITOR
+	if (GIsEditor && bDrawFrustumInEditor && !GetWorld()->IsPlayInEditor())
+	{
+		DrawCameraFrustum();
+	}
+#endif
+}
+
 #if WITH_EDITOR
 void UIntrinsicSceneCaptureComponent2D::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
@@ -30,15 +80,63 @@ void UIntrinsicSceneCaptureComponent2D::PostEditChangeProperty(FPropertyChangedE
 	if (PropertyChangedEvent.MemberProperty != nullptr)
 	{
 		FName MemberPropertyName = PropertyChangedEvent.MemberProperty->GetFName();
-		
+
 		// Check if any intrinsics-related property changed
-		if (MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, bUseCustomIntrinsics) ||
-			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, bUseIntrinsicsAsset) ||
-			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, IntrinsicsAsset) ||
-			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, InlineIntrinsics))
+		if (MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, bUseCustomIntrinsics) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, bUseIntrinsicsAsset) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, IntrinsicsAsset) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, InlineIntrinsics))
 		{
 			ApplyIntrinsics();
 		}
+
+		// Force immediate redraw when frustum properties change
+		if (MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, bDrawFrustumInEditor) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FrustumDrawDistance) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FrustumNearDistance) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FrustumColor) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FrustumLineThickness) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, bDrawFrustumPlanes) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FrustumPlaneColor) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, FOVAngle))
+		{
+			MarkRenderStateDirty();
+		}
+	}
+	else if (PropertyChangedEvent.Property != nullptr)
+	{
+		// Handle changes to properties within the IntrinsicsAsset or InlineIntrinsics struct
+		FName PropertyName = PropertyChangedEvent.Property->GetFName();
+
+		// Check if any intrinsics parameter changed (focal length, principal point, etc.)
+		if (PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, FocalLengthX) || PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, FocalLengthY) || PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, PrincipalPointX) || PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, PrincipalPointY) || PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, ImageWidth) || PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, ImageHeight) || PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, bMaintainYAxis))
+		{
+			ApplyIntrinsics();
+		}
+	}
+}
+
+void UIntrinsicSceneCaptureComponent2D::OnRegister()
+{
+	Super::OnRegister();
+
+	// Register delegate to listen for property changes on any object
+	if (!OnObjectPropertyChangedHandle.IsValid())
+	{
+		OnObjectPropertyChangedHandle = FCoreUObjectDelegates::OnObjectPropertyChanged.AddUObject(
+			this, &UIntrinsicSceneCaptureComponent2D::OnObjectPropertyChanged);
+	}
+}
+
+void UIntrinsicSceneCaptureComponent2D::OnUnregister()
+{
+	// Unregister delegate
+	if (OnObjectPropertyChangedHandle.IsValid())
+	{
+		FCoreUObjectDelegates::OnObjectPropertyChanged.Remove(OnObjectPropertyChangedHandle);
+		OnObjectPropertyChangedHandle.Reset();
+	}
+
+	Super::OnUnregister();
+}
+
+void UIntrinsicSceneCaptureComponent2D::OnObjectPropertyChanged(UObject* Object, FPropertyChangedEvent& PropertyChangedEvent)
+{
+	// Check if the changed object is our IntrinsicsAsset
+	if (Object == IntrinsicsAsset && IntrinsicsAsset != nullptr && bUseIntrinsicsAsset)
+	{
+		// An intrinsics property changed in our referenced asset
+		ApplyIntrinsics();
 	}
 }
 #endif
@@ -75,19 +173,22 @@ void UIntrinsicSceneCaptureComponent2D::ApplyIntrinsics()
 	if (Intrinsics.bMaintainYAxis)
 	{
 		// Adjust FOV to maintain Y-axis (vertical FOV) like gameplay camera
-		float AspectRatio = static_cast<float>(Intrinsics.ImageWidth) / static_cast<float>(Intrinsics.ImageHeight);
-		
+		float AspectRatio = 1.777f; // Default 16:9
+		if (Intrinsics.ImageHeight > 0)
+		{
+			AspectRatio = static_cast<float>(Intrinsics.ImageWidth) / static_cast<float>(Intrinsics.ImageHeight);
+		}
 		// Assume the current FOV is for a 16:9 aspect ratio (standard)
 		float ReferenceAspect = 16.0f / 9.0f;
-		
+
 		// Derive vertical FOV from current horizontal FOV
 		float HalfHFOVRad = FMath::DegreesToRadians(FOVAngle * 0.5f);
 		float HalfVFOVRad = FMath::Atan(FMath::Tan(HalfHFOVRad) / ReferenceAspect);
-		
+
 		// Recalculate horizontal FOV for the actual aspect ratio
 		float NewHalfHFOVRad = FMath::Atan(AspectRatio * FMath::Tan(HalfVFOVRad));
 		FOVAngle = FMath::RadiansToDegrees(NewHalfHFOVRad * 2.0f);
-		
+
 		bUseCustomProjectionMatrix = false;
 
 		UE_LOG(LogTemp, Log, TEXT("Applied Maintain Y-Axis to %s: New HFOV=%.2f deg (Aspect=%.3f)"),
@@ -100,7 +201,7 @@ void UIntrinsicSceneCaptureComponent2D::ApplyIntrinsics()
 		bUseCustomProjectionMatrix = true;
 
 		UE_LOG(LogTemp, Log, TEXT("Applied custom projection matrix to %s (fx=%.2f, fy=%.2f, cx=%.2f, cy=%.2f, %dx%d)"),
-			*GetName(), Intrinsics.FocalLengthX, Intrinsics.FocalLengthY, 
+			*GetName(), Intrinsics.FocalLengthX, Intrinsics.FocalLengthY,
 			Intrinsics.PrincipalPointX, Intrinsics.PrincipalPointY,
 			Intrinsics.ImageWidth, Intrinsics.ImageHeight);
 	}
@@ -118,31 +219,99 @@ FMatrix UIntrinsicSceneCaptureComponent2D::BuildProjectionMatrixFromIntrinsics(c
 
 	float Width = static_cast<float>(Intrinsics.ImageWidth);
 	float Height = static_cast<float>(Intrinsics.ImageHeight);
-	
+
 	// Convert from pixel-based intrinsics to normalized coordinates
 	float fx = Intrinsics.FocalLengthX / Width;
 	float fy = Intrinsics.FocalLengthY / Height;
 	float cx = (Intrinsics.PrincipalPointX - Width * 0.5f) / Width;
 	float cy = (Intrinsics.PrincipalPointY - Height * 0.5f) / Height;
-	
+
 	// Use GNearClippingPlane for consistency with config export
 	// Note: Using infinite far plane (reversed-Z projection)
 	float NearClip = GNearClippingPlane;
-	
+
 	// Build custom projection matrix from camera intrinsics
 	FMatrix ProjectionMatrix = FMatrix::Identity;
-	
+
 	// Scale factors from pixel space to normalized device coordinates
 	ProjectionMatrix.M[0][0] = 2.0f * fx;
 	ProjectionMatrix.M[1][1] = 2.0f * fy;
 	ProjectionMatrix.M[2][0] = 2.0f * cx;
 	ProjectionMatrix.M[2][1] = -2.0f * cy; // Flip Y for UE coordinate system
-	
+
 	// Standard perspective projection depth terms (reversed-Z with infinite far plane)
 	ProjectionMatrix.M[2][2] = 0.0f;
 	ProjectionMatrix.M[2][3] = 1.0f;
 	ProjectionMatrix.M[3][2] = NearClip;
 	ProjectionMatrix.M[3][3] = 0.0f;
-	
+
 	return ProjectionMatrix;
+}
+
+void UIntrinsicSceneCaptureComponent2D::DrawCameraFrustum()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	// Get the camera's world transform (ignore scale for frustum drawing)
+	FTransform CameraTransform = GetComponentTransform();
+	CameraTransform.SetScale3D(FVector::OneVector); // Always use scale of 1.0 for frustum
+
+	// Determine which projection matrix to use
+	FMatrix ProjectionMatrix;
+	bool	bHasValidProjection = false;
+
+	if (bUseCustomIntrinsics && bUseCustomProjectionMatrix)
+	{
+		// Use the custom projection matrix from intrinsics
+		ProjectionMatrix = CustomProjectionMatrix;
+		bHasValidProjection = true;
+	}
+	else if (!bUseCustomIntrinsics || (bUseCustomIntrinsics && GetActiveIntrinsics().bMaintainYAxis))
+	{
+		// Use FOV-based projection
+		float AspectRatio = 1.777f; // Default 16:9
+		if (TextureTarget && TextureTarget->SizeY > 0)
+		{
+			AspectRatio = static_cast<float>(TextureTarget->SizeX) / static_cast<float>(TextureTarget->SizeY);
+		}
+		else if (bUseCustomIntrinsics)
+		{
+			FCameraIntrinsics Intrinsics = GetActiveIntrinsics();
+			if (Intrinsics.ImageHeight > 0)
+			{
+				AspectRatio = static_cast<float>(Intrinsics.ImageWidth) / static_cast<float>(Intrinsics.ImageHeight);
+			}
+		}
+
+		// Build standard perspective projection from FOV
+		float HalfFOVRad = FMath::DegreesToRadians(FOVAngle * 0.5f);
+		ProjectionMatrix = FReversedZPerspectiveMatrix(HalfFOVRad, AspectRatio, 1.0f, GNearClippingPlane);
+		bHasValidProjection = true;
+	}
+
+	if (!bHasValidProjection)
+	{
+		return;
+	}
+
+	// Use shared utility function for drawing
+	CameraCaptureUtils::DrawFrustumFromProjectionMatrix(
+		World,
+		CameraTransform,
+		ProjectionMatrix,
+		FrustumNearDistance,
+		FrustumDrawDistance,
+		FrustumColor,
+		FrustumLineThickness,
+		bDrawFrustumPlanes,
+		FrustumPlaneColor);
+
+	// Optionally draw a small cross at the camera origin for reference
+	FVector	 CameraLocation = CameraTransform.GetLocation();
+	FRotator CameraRotation = CameraTransform.Rotator();
+	DrawDebugCrosshairs(World, CameraLocation, CameraRotation, 10.0f, FrustumColor, false, 0.0f, 0);
 }

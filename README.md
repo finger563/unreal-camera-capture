@@ -11,20 +11,48 @@ Provides:
   process material to it) and will configure it to output to a render texture.
   It will then create a copy of each camera which will render the color data to
   a texture as well. These textures can be captured (for other uses in the
-  engine), and optionally serialized / saved to disk. The component can be
-  configured to capture every frame of the camera or to capture frames at a
-  specific interval of time.
+  engine), and optionally serialized / saved to disk as EXR files. The component
+  can be configured to capture every frame of the camera or to capture frames at
+  a specific interval of time.
+- `ACameraCaptureManager` - A manager actor that provides centralized control
+  over multiple cameras using the `CameraCaptureSubsystem`. Automatically
+  discovers and registers `UIntrinsicSceneCaptureComponent2D` cameras in the
+  level, and provides Blueprint/C++ API for controlling capture.
+- `UCameraCaptureSubsystem` - Game instance subsystem that handles the actual
+  capture logic, file writing, and camera registration. Both `CaptureComponent`
+  and `CameraCaptureManager` can be used - they produce identical output formats.
 - `UIntrinsicSceneCaptureComponent2D` - A subclass of `USceneCaptureComponent2D`
   that supports custom camera intrinsics for precise camera calibration. Each
   camera can have different intrinsics defined either inline or via reusable
-  data assets.
+  data assets. Also supports frustum visualization in the editor. Use this for
+  capturing/rendering from non-player cameras.
+- `UIntrinsicCameraComponent` - A subclass of `UCameraComponent` that supports
+  custom camera intrinsics for player cameras. Allows you to set precise focal
+  lengths and principal points for first-person/third-person cameras, matching
+  real-world camera specifications. Includes frustum visualization.
 - `FCameraIntrinsics` - Data asset for storing camera intrinsic parameters
   (focal length, principal point, image dimensions) that can be shared across
   multiple cameras (e.g., "RealSense D435" preset).
 - A `M_DmvCapture` material for saving depth + motion vectors to a single
-  texture (used by `CaptureComponent`)
+  texture (used by both capture systems)
+
+<!-- markdown-toc start - Don't edit this section. Run M-x markdown-toc-refresh-toc -->
+**Table of Contents**
+
+- [Camera Capture Plugin for UE 5](#camera-capture-plugin-for-ue-5)
+  - [Usage](#usage)
+  - [Camera Intrinsics](#camera-intrinsics)
+  - [Data Collected](#data-collected)
+  - [Developing](#developing)
+    - [Code style](#code-style)
+  - [References](#references)
+
+<!-- markdown-toc end -->
+
 
 ## Usage
+
+### Option 1: Using CaptureComponent (Per-Actor)
 
 1. **Add cameras to your actor**: Attach `UIntrinsicSceneCaptureComponent2D` components
    to your actor (not the base `USceneCaptureComponent2D`).
@@ -44,13 +72,50 @@ Provides:
 4. **Configure capture settings**: Set `TimerPeriod`, `SaveLocation`, and other
    options on the `CaptureComponent`.
 
+### Option 2: Using CameraCaptureManager (Global)
+
+1. **Add cameras to the level**: Place actors with `UIntrinsicSceneCaptureComponent2D`
+   components in your level.
+
+2. **Add CameraCaptureManager**: Place a `CameraCaptureManager` actor in your level.
+
+3. **Configure manager settings**:
+   - Set `OutputDirectory` for where to save captures
+   - Set `CaptureEveryNFrames` for capture rate
+   - Enable/disable RGB, depth, and motion vector capture
+   - Enable `bAutoStartOnBeginPlay` to start capturing automatically
+
+4. **Control via Blueprint/C++**: Use `StartCapture()`, `StopCapture()`, and other
+   functions to control when capturing happens.
+
 **Note**: Each camera now defines its own image resolution through its intrinsics
 settings. The previous global `ImageWidth`/`ImageHeight` parameters have been
 removed.
 
+### Option 3: Using IntrinsicCameraComponent (Player Cameras)
+
+Use `UIntrinsicCameraComponent` instead of the base `UCameraComponent` for player cameras (first-person, third-person, etc.) when you need precise camera calibration.
+
+1. **Replace UCameraComponent**: In your Pawn or Character Blueprint/C++, replace
+   the standard `CameraComponent` with `IntrinsicCameraComponent`.
+
+2. **Configure intrinsics** (optional):
+   - Enable `bUseCustomIntrinsics`
+   - Either reference a `CameraIntrinsicsAsset` or configure inline parameters
+   - Set focal lengths, principal point, and image dimensions
+
+3. **Use as normal camera**: The component works exactly like `UCameraComponent` but
+   with the added ability to use custom projection matrices for precise calibration.
+
+**Use Cases**:
+- Matching a real-world camera's field of view precisely
+- Simulating specific camera hardware (e.g., GoPro, webcam)
+- Research applications requiring exact camera parameters
+- VR/AR applications with specific lens characteristics
+
 ## Camera Intrinsics
 
-The plugin supports two modes for camera projection:
+The plugin supports two modes for camera projection (available on both `UIntrinsicSceneCaptureComponent2D` and `UIntrinsicCameraComponent`):
 
 1. **Custom Intrinsics Mode** (`bUseCustomIntrinsics = true`):
    - Builds a custom projection matrix from pixel-based camera parameters
@@ -71,54 +136,151 @@ See also the
 some example code which provides processing and display of the data produced by
 the component in this repo.
 
-## Data Collected
+## Data Output Format
 
-The `CameraCapture` plugin's `CaptureComponent` creates the following data files
-within the `SaveLocation`:
+Both `CaptureComponent` and `CameraCaptureManager` produce identical output in EXR format with JSON metadata.
 
-- `camera_config.csv`: CSV formatted data (first row is header), which as the
-  follow information:
-  - `name`: The name of the camera
-  - `width`: The width of the image in pixels
-  - `height`: The height of the image in pixels
-  - `focalLength`: The focal length of the camera in meters
-  - `fov`: The horizontal field of view of the camera
-  - `nearClipPlane`: The near clip plane of the camera view frustum in meters
-  - `farClipPlane`: the far clip plane of the camera view frustum in meters (may be `inf`)
-  - `tx`: The relative position of the camera w.r.t. the actor position, x-axis
-  - `ty`: The relative position of the camera w.r.t. the actor position, y-axis
-  - `tz`: The relative position of the camera w.r.t. the actor position, z-axis
-  - `qw`: The relative orientation of the camera w.r.t. the actor orientation, w-component
-  - `qx`: The relative orientation of the camera w.r.t. the actor orientation, x-component
-  - `qy`: The relative orientation of the camera w.r.t. the actor orientation, y-component
-  - `qz`: The relative orientation of the camera w.r.t. the actor orientation, z-component
-- `transformations.csv`: CSV formatted data (first row is header), which has the
-  following information:
-  - `i`: frame index
-  - `time`: time since the start of the program at which data
-    (frames/transforms) were captured
-  - `tx`: actor world position along the world x-axis
-  - `ty`: actor world position along the world y-axis
-  - `tz`: actor world position along the world z-axis
-  - `qw`: actor world orientation as a quaternion, w-component
-  - `qx`: actor world orientation as a quaternion, x-component
-  - `qy`: actor world orientation as a quaternion, y-component
-  - `qz`: actor world orientation as a quaternion, z-component
-- `<camera name>_<index>.raw`: Uncompressed 4-channel, 32bit float formatted
-  (32bit float per channel) color image data for `<camera_name>` at 0-indexed
-  `<index>`. The mapping from `<index>` to time can be found in the
-  `transformations.csv` file.
-- `<camera name>_depth_motion_<index>.raw`: Uncompressed 4-channel 32bit float
-  formatted (32bit float per channel) depth (red channel) + motion vector data
-  (pixel x-y motion frame to frame in the green and blue channels) for `<camera
-  name>` at 0-indexed `<index>`. The mapping from `<index>` to time can be found
-  in the `transformations.csv` file.
+### Directory Structure
 
-The output data in this folder can be visualized using the [display_raw python
-script](https://github.com/finger563/unreal-python-tools/blob/main/display_raw.py).
-An example visualization can be found below:
+Both systems organize output by **actor**, then by **camera**:
+
+```
+SaveLocation/
+├── ActorName1/                        # e.g., "Robot_BP_C_0"
+│   ├── camera_config.csv              # Legacy config file (CaptureComponent only)
+│   ├── transformations.csv            # Legacy transform CSV (CaptureComponent only)
+│   ├── CameraName1/                   # e.g., "HeadCamera"
+│   │   ├── frame_0000000.exr          # RGB + Depth (in alpha channel)
+│   │   ├── frame_0000000_motion.exr   # Motion vectors (X in R, Y in G)
+│   │   ├── frame_0000000.json         # Metadata
+│   │   ├── frame_0000001.exr
+│   │   ├── frame_0000001_motion.exr
+│   │   └── frame_0000001.json
+│   └── CameraName2/                   # e.g., "ChestCamera"
+│       └── ...
+└── ActorName2/                        # e.g., "Robot_BP_C_1"
+    └── ...
+```
+
+**Note**: The actor-based folder structure makes it easy to organize data from multiple robots or actors in the same capture session.
+
+### EXR Files
+
+- **`frame_NNNNNNN.exr`**: 
+  - **RGB channels**: Linear color data (FLinearColor)
+  - **Alpha channel**: Depth data (in cm, raw from depth buffer)
+  - Format: EXR with 32-bit float precision
+  
+- **`frame_NNNNNNN_motion.exr`**:
+  - **R channel**: Motion vector X (horizontal pixel motion)
+  - **G channel**: Motion vector Y (vertical pixel motion)
+  - **B/A channels**: Unused (0.0)
+  - Format: EXR with 32-bit float precision
+
+### JSON Metadata
+
+Each frame has an accompanying JSON file (`frame_NNNNNNN.json`) with complete camera and transform information:
+
+```json
+{
+  "frame_number": 0,
+  "timestamp": 1.234,
+  "camera_id": "RGBCamera",
+  "world_transform": {
+    "location": [x, y, z],           // In meters (converted from UE cm)
+    "rotation": [pitch, yaw, roll],  // In degrees
+    "quaternion": [w, x, y, z],      // Normalized quaternion
+    "scale": [x, y, z]               // Component scale
+  },
+  "intrinsics": {
+    "focal_length_x": 320.0,         // Pixels
+    "focal_length_y": 320.0,         // Pixels
+    "principal_point_x": 320.0,      // Pixels
+    "principal_point_y": 240.0,      // Pixels
+    "image_width": 640,              // Pixels
+    "image_height": 480,             // Pixels
+    "maintain_y_axis": false         // Y-axis FOV mode
+  },
+  "actor_path": "/Game/...",         // Full UE object path
+  "level_name": "MyLevel"            // Level name
+}
+```
+
+### Legacy CSV Files (CaptureComponent only)
+
+For backward compatibility, `CaptureComponent` also generates:
+
+- **`camera_config.csv`**: Static camera configuration
+  - Columns: `name`, `width`, `height`, `focalLength`, `fov`, `nearClipPlane`, `farClipPlane`, 
+    `tx`, `ty`, `tz`, `qw`, `qx`, `qy`, `qz` (relative transform)
+
+- **`transformations.csv`**: Per-frame actor transforms
+  - Columns: `i` (frame index), `time`, `tx`, `ty`, `tz`, `qw`, `qx`, `qy`, `qz` (world position in meters + quaternion)
+
+**Note**: The JSON metadata format is recommended for new projects as it includes more complete information.
+
+## Reading EXR Files
+
+EXR files can be read using standard libraries:
+
+**Python (OpenEXR):**
+```python
+import OpenEXR
+import Imath
+import numpy as np
+
+# Read RGB + Depth
+exr_file = OpenEXR.InputFile("frame_0000000.exr")
+header = exr_file.header()
+dw = header['dataWindow']
+width = dw.max.x - dw.min.x + 1
+height = dw.max.y - dw.min.y + 1
+
+# Read channels
+pt = Imath.PixelType(Imath.PixelType.FLOAT)
+rgb_str = [exr_file.channel(c, pt) for c in ['R', 'G', 'B']]
+depth_str = exr_file.channel('A', pt)
+
+# Convert to numpy arrays
+rgb = np.array([np.frombuffer(c, dtype=np.float32).reshape(height, width) for c in rgb_str])
+rgb = np.transpose(rgb, (1, 2, 0))  # HWC format
+depth = np.frombuffer(depth_str, dtype=np.float32).reshape(height, width)
+```
+
+**Python (imageio):**
+```python
+import imageio
+import numpy as np
+
+# Simpler API using imageio
+img = imageio.imread("frame_0000000.exr")
+rgb = img[:, :, :3]
+depth = img[:, :, 3]
+```
+
+## Visualization
+
+An example visualization of captured data:
 
 ![example](https://github.com/finger563/unreal-camera-capture/assets/213467/dc91ba5a-21bc-47c5-92cd-5b09414c6420)
+
+## Developing
+
+If you want to contribute or customize the plugin, you can clone the repository
+and set it up in your Unreal project. If you want to make changes to the code,
+please follow the code style guidelines below.
+
+### Code style
+
+1. Ensure `clang-format` is installed
+2. Ensure [pre-commit](https://pre-commit.com) is installed
+3. Set up `pre-commit` for this repository:
+
+  ``` console
+  pre-commit install
+  ```
+
+This helps ensure that consistent code formatting is applied.
 
 ## References
 
