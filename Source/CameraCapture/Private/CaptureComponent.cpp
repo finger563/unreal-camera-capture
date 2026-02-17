@@ -332,8 +332,18 @@ void UCaptureComponent::InitOutput()
 	{
 		IFileManager::Get().MakeDirectory(*SaveLocation);
 	}
-	ConfigFile = FPaths::Combine(*SaveLocation, *FString("camera_config.csv"));
-	TransformFile = FPaths::Combine(*SaveLocation, *FString("transformations.csv"));
+	
+	// Create actor-based directory structure (matching CameraCaptureManager)
+	FString ActorName = GetOwner() ? GetOwner()->GetName() : TEXT("UnknownActor");
+	FString ActorPath = FPaths::Combine(*SaveLocation, *ActorName);
+	if (!IFileManager::Get().DirectoryExists(*ActorPath))
+	{
+		IFileManager::Get().MakeDirectory(*ActorPath, true);
+	}
+	
+	// Legacy CSV files go in actor folder (not per-camera, since they contain all cameras on this actor)
+	ConfigFile = FPaths::Combine(*ActorPath, *FString("camera_config.csv"));
+	TransformFile = FPaths::Combine(*ActorPath, *FString("transformations.csv"));
 }
 
 void UCaptureComponent::WriteConfigFile()
@@ -532,8 +542,11 @@ void UCaptureComponent::SaveData()
 			Intrinsics.bMaintainYAxis = false;
 		}
 
-		// Setup output directories (one per camera)
-		FString CameraPath = FPaths::Combine(*SaveLocation, *rgb->GetFName().ToString());
+		// Setup output directories (actor-based, matching CameraCaptureManager)
+		// Structure: SaveLocation/ActorName/CameraName/
+		FString ActorName = GetOwner() ? GetOwner()->GetName() : TEXT("UnknownActor");
+		FString CameraName = rgb->GetFName().ToString();
+		FString CameraPath = FPaths::Combine(*SaveLocation, *ActorName, *CameraName);
 		if (!IFileManager::Get().DirectoryExists(*CameraPath))
 		{
 			IFileManager::Get().MakeDirectory(*CameraPath, true);

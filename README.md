@@ -116,20 +116,27 @@ Both `CaptureComponent` and `CameraCaptureManager` produce identical output in E
 
 ### Directory Structure
 
+Both systems organize output by **actor**, then by **camera**:
+
 ```
 SaveLocation/
-├── CameraName1/
-│   ├── frame_0000000.exr          # RGB + Depth (in alpha channel)
-│   ├── frame_0000000_motion.exr   # Motion vectors (X in R, Y in G)
-│   ├── frame_0000000.json         # Metadata
-│   ├── frame_0000001.exr
-│   ├── frame_0000001_motion.exr
-│   └── frame_0000001.json
-├── CameraName2/
-│   └── ...
-└── camera_config.csv               # Legacy config file (CaptureComponent only)
-    transformations.csv              # Legacy transform CSV (CaptureComponent only)
+├── ActorName1/                        # e.g., "Robot_BP_C_0"
+│   ├── camera_config.csv              # Legacy config file (CaptureComponent only)
+│   ├── transformations.csv            # Legacy transform CSV (CaptureComponent only)
+│   ├── CameraName1/                   # e.g., "HeadCamera"
+│   │   ├── frame_0000000.exr          # RGB + Depth (in alpha channel)
+│   │   ├── frame_0000000_motion.exr   # Motion vectors (X in R, Y in G)
+│   │   ├── frame_0000000.json         # Metadata
+│   │   ├── frame_0000001.exr
+│   │   ├── frame_0000001_motion.exr
+│   │   └── frame_0000001.json
+│   └── CameraName2/                   # e.g., "ChestCamera"
+│       └── ...
+└── ActorName2/                        # e.g., "Robot_BP_C_1"
+    └── ...
 ```
+
+**Note**: The actor-based folder structure makes it easy to organize data from multiple robots or actors in the same capture session.
 
 ### EXR Files
 
