@@ -63,5 +63,49 @@ namespace CameraCaptureUtils
 						   float						Timestamp,
 						   const FString&				ActorPath = TEXT(""),
 						   const FString&				LevelName = TEXT(""));
+
+	/**
+	 * Draw a camera frustum for visualization using projection matrix
+	 * @param World - World to draw in
+	 * @param CameraTransform - Camera world transform (scale will be ignored)
+	 * @param ProjectionMatrix - Projection matrix to visualize
+	 * @param NearDistance - Near plane distance (in cm)
+	 * @param FarDistance - Far plane distance (in cm)
+	 * @param LineColor - Color for frustum lines
+	 * @param LineThickness - Thickness of frustum lines
+	 * @param bDrawPlanes - Whether to draw filled frustum planes
+	 * @param PlaneColor - Color for frustum planes (with alpha)
+	 */
+	void DrawFrustumFromProjectionMatrix(UWorld*					World,
+										 const FTransform&			CameraTransform,
+										 const FMatrix&				ProjectionMatrix,
+										 float						NearDistance,
+										 float						FarDistance,
+										 const FColor&				LineColor,
+										 float						LineThickness,
+										 bool						bDrawPlanes,
+										 const FLinearColor&		PlaneColor);
+
+	/**
+	 * Draw a camera frustum for visualization using intrinsics
+	 * @param World - World to draw in
+	 * @param CameraTransform - Camera world transform (scale will be ignored)
+	 * @param Intrinsics - Camera intrinsics
+	 * @param NearDistance - Near plane distance (in cm)
+	 * @param FarDistance - Far plane distance (in cm)
+	 * @param LineColor - Color for frustum lines
+	 * @param LineThickness - Thickness of frustum lines
+	 * @param bDrawPlanes - Whether to draw filled frustum planes
+	 * @param PlaneColor - Color for frustum planes (with alpha)
+	 */
+	void DrawFrustumFromIntrinsics(UWorld*					World,
+								   const FTransform&		CameraTransform,
+								   const FCameraIntrinsics&	Intrinsics,
+								   float					NearDistance,
+								   float					FarDistance,
+								   const FColor&			LineColor,
+								   float					LineThickness,
+								   bool						bDrawPlanes,
+								   const FLinearColor&		PlaneColor);
 }
 

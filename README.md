@@ -24,7 +24,12 @@ Provides:
 - `UIntrinsicSceneCaptureComponent2D` - A subclass of `USceneCaptureComponent2D`
   that supports custom camera intrinsics for precise camera calibration. Each
   camera can have different intrinsics defined either inline or via reusable
-  data assets. Also supports frustum visualization in the editor.
+  data assets. Also supports frustum visualization in the editor. Use this for
+  capturing/rendering from non-player cameras.
+- `UIntrinsicCameraComponent` - A subclass of `UCameraComponent` that supports
+  custom camera intrinsics for player cameras. Allows you to set precise focal
+  lengths and principal points for first-person/third-person cameras, matching
+  real-world camera specifications. Includes frustum visualization.
 - `FCameraIntrinsics` - Data asset for storing camera intrinsic parameters
   (focal length, principal point, image dimensions) that can be shared across
   multiple cameras (e.g., "RealSense D435" preset).
@@ -87,9 +92,30 @@ Provides:
 settings. The previous global `ImageWidth`/`ImageHeight` parameters have been
 removed.
 
+### Option 3: Using IntrinsicCameraComponent (Player Cameras)
+
+Use `UIntrinsicCameraComponent` instead of the base `UCameraComponent` for player cameras (first-person, third-person, etc.) when you need precise camera calibration.
+
+1. **Replace UCameraComponent**: In your Pawn or Character Blueprint/C++, replace
+   the standard `CameraComponent` with `IntrinsicCameraComponent`.
+
+2. **Configure intrinsics** (optional):
+   - Enable `bUseCustomIntrinsics`
+   - Either reference a `CameraIntrinsicsAsset` or configure inline parameters
+   - Set focal lengths, principal point, and image dimensions
+
+3. **Use as normal camera**: The component works exactly like `UCameraComponent` but
+   with the added ability to use custom projection matrices for precise calibration.
+
+**Use Cases**:
+- Matching a real-world camera's field of view precisely
+- Simulating specific camera hardware (e.g., GoPro, webcam)
+- Research applications requiring exact camera parameters
+- VR/AR applications with specific lens characteristics
+
 ## Camera Intrinsics
 
-The plugin supports two modes for camera projection:
+The plugin supports two modes for camera projection (available on both `UIntrinsicSceneCaptureComponent2D` and `UIntrinsicCameraComponent`):
 
 1. **Custom Intrinsics Mode** (`bUseCustomIntrinsics = true`):
    - Builds a custom projection matrix from pixel-based camera parameters

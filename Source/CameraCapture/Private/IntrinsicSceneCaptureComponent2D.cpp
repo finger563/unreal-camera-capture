@@ -1,5 +1,6 @@
 #include "IntrinsicSceneCaptureComponent2D.h"
 #include "CameraCaptureSubsystem.h"
+#include "Utilities.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/World.h"
 
@@ -252,14 +253,9 @@ void UIntrinsicSceneCaptureComponent2D::DrawCameraFrustum()
 		return;
 	}
 
-	// Determine if we're in editor mode
-	bool bIsEditorWorld = GIsEditor && !World->IsGameWorld();
-
 	// Get the camera's world transform (ignore scale for frustum drawing)
 	FTransform CameraTransform = GetComponentTransform();
 	CameraTransform.SetScale3D(FVector::OneVector); // Always use scale of 1.0 for frustum
-	FVector	 CameraLocation = CameraTransform.GetLocation();
-	FRotator CameraRotation = CameraTransform.Rotator();
 
 	// Determine which projection matrix to use
 	FMatrix ProjectionMatrix;
@@ -296,115 +292,20 @@ void UIntrinsicSceneCaptureComponent2D::DrawCameraFrustum()
 		return;
 	}
 
-	// Invert the projection matrix to get view-space corners
-	FMatrix InvProjectionMatrix = ProjectionMatrix.Inverse();
-
-	// Define the 4 corners of the far plane in normalized device coordinates (NDC)
-	// NDC: X[-1,1], Y[-1,1], Z[0,1] (reversed-Z)
-	FVector4 NDCCorners[4] = {
-		FVector4(-1.0f, -1.0f, 0.0f, 1.0f), // Bottom-left
-		FVector4(1.0f, -1.0f, 0.0f, 1.0f),	// Bottom-right
-		FVector4(1.0f, 1.0f, 0.0f, 1.0f),	// Top-right
-		FVector4(-1.0f, 1.0f, 0.0f, 1.0f)	// Top-left
-	};
-
-	// Transform corners from NDC to view space, then normalize to get direction vectors
-	FVector ViewSpaceDirs[4];
-	for (int32 i = 0; i < 4; i++)
-	{
-		FVector4 ViewSpace4 = InvProjectionMatrix.TransformFVector4(NDCCorners[i]);
-
-		// Perspective divide
-		if (FMath::Abs(ViewSpace4.W) > SMALL_NUMBER)
-		{
-			ViewSpaceDirs[i] = FVector(ViewSpace4.X, ViewSpace4.Y, ViewSpace4.Z) / ViewSpace4.W;
-		}
-		else
-		{
-			ViewSpaceDirs[i] = FVector(ViewSpace4.X, ViewSpace4.Y, ViewSpace4.Z);
-		}
-		ViewSpaceDirs[i] = ViewSpaceDirs[i].GetSafeNormal();
-	}
-
-	const float NearDist = FMath::Max(1.0f, FrustumNearDistance);
-	const float FarDist = FMath::Max(NearDist + 1.0f, FrustumDrawDistance);
-
-	// Transform view-space corners to world space
-	// UE SceneCaptureComponent2D: Camera looks down +X (Forward), Y=Right, Z=Up in local space
-	// But view space from projection matrix: X=right, Y=up, Z=back (OpenGL convention)
-	// We need to convert: ViewSpace.X->LocalY, ViewSpace.Y->LocalZ, ViewSpace.Z->LocalX (negated)
-	FVector NearWorld[4];
-	FVector FarWorld[4];
-	for (int32 i = 0; i < 4; i++)
-	{
-		const FVector ViewDir = ViewSpaceDirs[i];
-		FVector		  LocalNear;
-		FVector		  LocalFar;
-		LocalNear.X = ViewDir.Z * NearDist; // View back (Z) -> Local forward (X)
-		LocalNear.Y = ViewDir.X * NearDist; // View right (X) -> Local right (Y)
-		LocalNear.Z = ViewDir.Y * NearDist; // View up (Y) -> Local up (Z)
-
-		LocalFar.X = ViewDir.Z * FarDist;
-		LocalFar.Y = ViewDir.X * FarDist;
-		LocalFar.Z = ViewDir.Y * FarDist;
-
-		NearWorld[i] = CameraTransform.TransformPosition(LocalNear);
-		FarWorld[i] = CameraTransform.TransformPosition(LocalFar);
-	}
-
-	float LifeTime = 0.0f; // 0 = single frame, >0 for persistent, <0 for infinite
-	bool  bPersistent = false;
-
-	// Draw lines from camera origin to each corner
-	for (int32 i = 0; i < 4; i++)
-	{
-		DrawDebugLine(World, CameraLocation, FarWorld[i], FrustumColor, bPersistent, LifeTime, 0, FrustumLineThickness);
-	}
-
-	// Draw lines connecting the corners (near/far plane rectangles)
-	for (int32 i = 0; i < 4; i++)
-	{
-		int32 NextIdx = (i + 1) % 4;
-		DrawDebugLine(World, FarWorld[i], FarWorld[NextIdx], FrustumColor, bPersistent, LifeTime, 0, FrustumLineThickness);
-		DrawDebugLine(World, NearWorld[i], NearWorld[NextIdx], FrustumColor, bPersistent, LifeTime, 0, FrustumLineThickness);
-		DrawDebugLine(World, NearWorld[i], FarWorld[i], FrustumColor, bPersistent, LifeTime, 0, FrustumLineThickness);
-	}
-
-	if (bDrawFrustumPlanes)
-	{
-		const FColor PlaneColor = FrustumPlaneColor.ToFColor(true);
-
-		auto DrawQuad = [&](const FVector& A, const FVector& B, const FVector& C, const FVector& D) {
-			TArray<FVector> Verts;
-			Verts.Reserve(4);
-			Verts.Add(A);
-			Verts.Add(B);
-			Verts.Add(C);
-			Verts.Add(D);
-
-			TArray<int32> Indices;
-			Indices.Reserve(6);
-			Indices.Add(0);
-			Indices.Add(1);
-			Indices.Add(2);
-			Indices.Add(0);
-			Indices.Add(2);
-			Indices.Add(3);
-
-			DrawDebugMesh(World, Verts, Indices, PlaneColor, bPersistent, LifeTime, 0);
-		};
-
-		// Near and far planes
-		DrawQuad(NearWorld[0], NearWorld[1], NearWorld[2], NearWorld[3]);
-		DrawQuad(FarWorld[0], FarWorld[1], FarWorld[2], FarWorld[3]);
-
-		// Side planes
-		DrawQuad(NearWorld[0], NearWorld[3], FarWorld[3], FarWorld[0]); // left
-		DrawQuad(NearWorld[1], NearWorld[2], FarWorld[2], FarWorld[1]); // right
-		DrawQuad(NearWorld[0], NearWorld[1], FarWorld[1], FarWorld[0]); // bottom
-		DrawQuad(NearWorld[3], NearWorld[2], FarWorld[2], FarWorld[3]); // top
-	}
+	// Use shared utility function for drawing
+	CameraCaptureUtils::DrawFrustumFromProjectionMatrix(
+		World,
+		CameraTransform,
+		ProjectionMatrix,
+		FrustumNearDistance,
+		FrustumDrawDistance,
+		FrustumColor,
+		FrustumLineThickness,
+		bDrawFrustumPlanes,
+		FrustumPlaneColor);
 
 	// Optionally draw a small cross at the camera origin for reference
-	DrawDebugCrosshairs(World, CameraLocation, CameraRotation, 10.0f, FrustumColor, bPersistent, LifeTime, 0);
+	FVector CameraLocation = CameraTransform.GetLocation();
+	FRotator CameraRotation = CameraTransform.Rotator();
+	DrawDebugCrosshairs(World, CameraLocation, CameraRotation, 10.0f, FrustumColor, false, 0.0f, 0);
 }
