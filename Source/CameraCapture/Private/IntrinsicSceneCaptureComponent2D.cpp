@@ -19,6 +19,9 @@ UIntrinsicSceneCaptureComponent2D::UIntrinsicSceneCaptureComponent2D()
 	bTickInEditor = true;
 #endif
 
+    // ensure we use the newer form of render scene primitives (not legacy)
+    PrimitiveRenderMode = ESceneCapturePrimitiveRenderMode::PRM_RenderScenePrimitives;
+
 	// We control capture timing via CaptureComponent, so disable auto-capture
 	bCaptureEveryFrame = false;
 	bCaptureOnMovement = false;

@@ -29,9 +29,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture")
 	float TimerDelay = 0.5f;
 
-	// What source do we use for RGB SceneCaptureComponent2D data?
+	// What source do we use for RGB SceneCaptureComponent2D data? Default to Final Color with tone curve
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture")
-	TEnumAsByte<ESceneCaptureSource> CaptureSource = ESceneCaptureSource::SCS_FinalColorLDR;
+	TEnumAsByte<ESceneCaptureSource> CaptureSource = ESceneCaptureSource::SCS_FinalColorHDR;
 
 	// Reference to objects to not render in data collection cameras
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Capture")
