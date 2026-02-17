@@ -1,5 +1,6 @@
 #include "CameraCaptureSubsystem.h"
 #include "IntrinsicSceneCaptureComponent2D.h"
+#include "Utilities.h"
 #include "Engine/World.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "GameFramework/Actor.h"
@@ -8,14 +9,6 @@
 #include "Misc/FileHelper.h"
 #include "HAL/PlatformFileManager.h"
 #include "ImageUtils.h"
-#include "Dom/JsonObject.h"
-#include "Serialization/JsonWriter.h"
-#include "Serialization/JsonSerializer.h"
-#include "ImageWriteQueue.h"
-#include "ImageWriteTask.h"
-#include "Modules/ModuleManager.h"
-#include "IImageWrapper.h"
-#include "IImageWrapperModule.h"
 
 // ============================================================================
 // FCameraIdentifier Implementation
@@ -732,124 +725,53 @@ bool UCameraCaptureSubsystem::WriteEXRFile(const FString& FilePath, const FCaptu
 		return false;
 	}
 
-	// Prepare multi-channel pixel data for RGBA (RGB + Depth in Alpha)
-	TArray64<FLinearColor> PixelData;
-	PixelData.SetNum(NumPixels);
+	// Convert FCaptureData format to TArray<FLinearColor> format expected by utility functions
+	TArray<FLinearColor> RgbData;
+	TArray<FLinearColor> DmvData;
+	RgbData.SetNum(NumPixels);
+	DmvData.SetNum(NumPixels);
 
-	// Convert RGB from FColor (0-255) to FLinearColor (0-1)
+	// Convert RGB from FColor to FLinearColor
 	if (bCaptureRGB && Data.ImageData.Num() == NumPixels)
 	{
 		for (int32 i = 0; i < NumPixels; i++)
 		{
-			PixelData[i] = FLinearColor(Data.ImageData[i]);
+			RgbData[i] = FLinearColor(Data.ImageData[i]);
 		}
 	}
 	else
 	{
-		// Fill with black if no RGB data
 		for (int32 i = 0; i < NumPixels; i++)
 		{
-			PixelData[i] = FLinearColor::Black;
+			RgbData[i] = FLinearColor::Black;
 		}
 	}
 
-	// Store depth in Alpha channel
-	if (bCaptureDepth && Data.DepthData.Num() == NumPixels)
+	// Prepare DMV data: Depth in R, Motion X in G, Motion Y in B
+	for (int32 i = 0; i < NumPixels; i++)
 	{
-		for (int32 i = 0; i < NumPixels; i++)
-		{
-			// Normalize depth to 0-1 range for storage (assuming max depth of 10000cm = 100m)
-			float NormalizedDepth = FMath::Clamp(Data.DepthData[i] / 10000.0f, 0.0f, 1.0f);
-			PixelData[i].A = NormalizedDepth;
-		}
+		float Depth = (bCaptureDepth && Data.DepthData.Num() == NumPixels) ? Data.DepthData[i] : 0.0f;
+		float MotionX = (bCaptureMotionVectors && Data.MotionVectorData.Num() == NumPixels) ? Data.MotionVectorData[i].X : 0.0f;
+		float MotionY = (bCaptureMotionVectors && Data.MotionVectorData.Num() == NumPixels) ? Data.MotionVectorData[i].Y : 0.0f;
+		
+		DmvData[i] = FLinearColor(Depth, MotionX, MotionY, 0.0f);
 	}
 
-	// Store motion vectors separately if we have them
-	TArray<float> MotionXData;
-	TArray<float> MotionYData;
-	bool		  bHasMotion = bCaptureMotionVectors && Data.MotionVectorData.Num() == NumPixels;
-
-	if (bHasMotion)
+	// Use shared utility to write RGB+Depth EXR
+	if (!CameraCaptureUtils::WriteEXRFile(FilePath, RgbData, DmvData, Data.Width, Data.Height, true))
 	{
-		MotionXData.SetNum(NumPixels);
-		MotionYData.SetNum(NumPixels);
-
-		for (int32 i = 0; i < NumPixels; i++)
-		{
-			MotionXData[i] = Data.MotionVectorData[i].X;
-			MotionYData[i] = Data.MotionVectorData[i].Y;
-		}
-	}
-
-	// Create image write task for base RGBA channels
-	TUniquePtr<FImageWriteTask> ImageTask = MakeUnique<FImageWriteTask>();
-	ImageTask->PixelData = MakeUnique<TImagePixelData<FLinearColor>>(FIntPoint(Data.Width, Data.Height), MoveTemp(PixelData));
-	ImageTask->Filename = FilePath;
-	ImageTask->Format = EImageFormat::EXR;
-	ImageTask->CompressionQuality = (int32)EImageCompressionQuality::Default;
-	ImageTask->bOverwriteFile = true;
-
-	// Add completion callback
-	ImageTask->OnCompleted = [FilePath](bool bSuccess) {
-		if (bSuccess)
-		{
-			UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] ✓ EXR write complete: %s"), *FilePath);
-		}
-		else
-		{
-			UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] ✗ EXR write FAILED: %s"), *FilePath);
-		}
-	};
-
-	// Get the image write queue module
-	IImageWriteQueueModule* ImageWriteQueueModule = FModuleManager::Get().GetModulePtr<IImageWriteQueueModule>("ImageWriteQueue");
-	if (!ImageWriteQueueModule)
-	{
-		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Failed to get ImageWriteQueue module"));
+		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Failed to write RGB+Depth EXR: %s"), *FilePath);
 		return false;
 	}
 
-	// Submit main EXR task
-	ImageWriteQueueModule->GetWriteQueue().Enqueue(MoveTemp(ImageTask));
-
-	// If we have motion vectors, write them to a separate file asynchronously
-	if (bHasMotion)
+	// Write motion vectors to separate file if we have them
+	if (bCaptureMotionVectors && Data.MotionVectorData.Num() == NumPixels)
 	{
-		const FString MotionPath = FilePath.Replace(TEXT(".exr"), TEXT("_motion.exr"));
-		const int32	  Width = Data.Width;
-		const int32	  Height = Data.Height;
-
-		AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [MotionPath, Width, Height, MotionXData, MotionYData]() {
-			// Create motion image with X in R channel, Y in G channel
-			TArray64<FLinearColor> MotionPixels;
-			MotionPixels.SetNum(Width * Height);
-
-			for (int32 i = 0; i < Width * Height; i++)
-			{
-				MotionPixels[i] = FLinearColor(MotionXData[i], MotionYData[i], 0.0f, 0.0f);
-			}
-
-			// Write motion EXR
-			TUniquePtr<FImageWriteTask> MotionTask = MakeUnique<FImageWriteTask>();
-			MotionTask->PixelData = MakeUnique<TImagePixelData<FLinearColor>>(FIntPoint(Width, Height), MoveTemp(MotionPixels));
-			MotionTask->Filename = MotionPath;
-			MotionTask->Format = EImageFormat::EXR;
-			MotionTask->CompressionQuality = (int32)EImageCompressionQuality::Default;
-			MotionTask->bOverwriteFile = true;
-
-			MotionTask->OnCompleted = [MotionPath](bool bSuccess) {
-				if (bSuccess)
-				{
-					UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] ✓ Motion EXR write complete: %s"), *MotionPath);
-				}
-			};
-
-			IImageWriteQueueModule* MotionWriteModule = FModuleManager::Get().GetModulePtr<IImageWriteQueueModule>("ImageWriteQueue");
-			if (MotionWriteModule)
-			{
-				MotionWriteModule->GetWriteQueue().Enqueue(MoveTemp(MotionTask));
-			}
-		});
+		FString MotionPath = FilePath.Replace(TEXT(".exr"), TEXT("_motion.exr"));
+		if (!CameraCaptureUtils::WriteEXRFile(MotionPath, RgbData, DmvData, Data.Width, Data.Height, false))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[CameraCaptureSubsystem] Failed to write motion EXR: %s"), *MotionPath);
+		}
 	}
 
 	return true;

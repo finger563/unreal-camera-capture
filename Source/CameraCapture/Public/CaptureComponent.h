@@ -131,9 +131,6 @@ protected:
 	void CaptureData();
 	void SaveData();
 
-	// Creates an async task that will save the captured image to disk
-	void RunAsyncImageSaveTask(TArray<FLinearColor> Image, FString ImageName, int width, int height);
-
 	// Timer for handling state update and rendering
 	FTimerHandle CaptureTimerHandle;
 
@@ -148,25 +145,4 @@ protected:
 
 public:
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
-};
-
-class AsyncSaveImageToDiskTask : public FNonAbandonableTask
-{
-public:
-	AsyncSaveImageToDiskTask(TArray<FLinearColor> Image, FString ImageName, int _width, int _height);
-	~AsyncSaveImageToDiskTask();
-
-	FORCEINLINE TStatId GetStatId() const
-	{
-		RETURN_QUICK_DECLARE_CYCLE_STAT(AsyncSaveImageToDiskTask, STATGROUP_ThreadPoolAsyncTasks);
-	}
-
-protected:
-	TArray<FLinearColor> ImageCopy;
-	FString				 FileName = "";
-	int					 width;
-	int					 height;
-
-public:
-	void DoWork();
 };

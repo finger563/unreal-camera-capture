@@ -4,10 +4,11 @@
 
 #include "Components/SceneCaptureComponent2D.h"
 #include "IntrinsicSceneCaptureComponent2D.h"
+#include "Utilities.h"
 #include "Engine.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Kismet/GameplayStatics.h"
-#include "Serialization/BufferArchive.h"
+#include "Misc/FileHelper.h"
 
 // stl includes
 #include <limits>
@@ -458,11 +459,6 @@ void UCaptureComponent::UpdateTransformFile()
 	}
 }
 
-void UCaptureComponent::RunAsyncImageSaveTask(TArray<FLinearColor> Image, FString ImageName, int width, int height)
-{
-	(new FAutoDeleteAsyncTask<AsyncSaveImageToDiskTask>(Image, ImageName, width, height))->StartBackgroundTask();
-}
-
 void UCaptureComponent::CaptureData()
 {
 	// if we're not capturing data, just return
@@ -489,7 +485,7 @@ void UCaptureComponent::SaveData()
 	{
 		return;
 	}
-	FString suffix = "_" + FString::FromInt(ImageIndex) + ".raw";
+
 	for (int i = 0; i < RgbCameras.Num(); i++)
 	{
 		// get the cameras and their render textures
@@ -517,70 +513,54 @@ void UCaptureComponent::SaveData()
 		dmv_rt->GameThread_GetRenderTargetResource()->ReadLinearColorPixels(dmv_data);
 		rgb_rt->GameThread_GetRenderTargetResource()->ReadLinearColorPixels(rgb_data);
 
-		// setup the output
-		FString dmv_filename = FPaths::Combine(*SaveLocation, *dmv->GetFName().ToString() + suffix);
-		FString rgb_filename = FPaths::Combine(*SaveLocation, *rgb->GetFName().ToString() + suffix);
+		// Get camera intrinsics
+		UIntrinsicSceneCaptureComponent2D* IntrinsicCamera = Cast<UIntrinsicSceneCaptureComponent2D>(rgb);
+		FCameraIntrinsics					Intrinsics;
+		if (IntrinsicCamera)
+		{
+			Intrinsics = IntrinsicCamera->GetActiveIntrinsics();
+		}
+		else
+		{
+			// Default intrinsics if not using IntrinsicSceneCaptureComponent2D
+			Intrinsics.ImageWidth = rgb_rt->SizeX;
+			Intrinsics.ImageHeight = rgb_rt->SizeY;
+			Intrinsics.FocalLengthX = rgb_rt->SizeX / 2.0f;
+			Intrinsics.FocalLengthY = rgb_rt->SizeY / 2.0f;
+			Intrinsics.PrincipalPointX = rgb_rt->SizeX / 2.0f;
+			Intrinsics.PrincipalPointY = rgb_rt->SizeY / 2.0f;
+			Intrinsics.bMaintainYAxis = false;
+		}
 
-		// now spawn tasks to save the image data to files
-		RunAsyncImageSaveTask(dmv_data, dmv_filename, dmv_rt->SizeX, dmv_rt->SizeY);
-		RunAsyncImageSaveTask(rgb_data, rgb_filename, rgb_rt->SizeX, rgb_rt->SizeY);
+		// Setup output directories (one per camera)
+		FString CameraPath = FPaths::Combine(*SaveLocation, *rgb->GetFName().ToString());
+		if (!IFileManager::Get().DirectoryExists(*CameraPath))
+		{
+			IFileManager::Get().MakeDirectory(*CameraPath, true);
+		}
+
+		// Generate frame filename (frame_0000000.exr format, matching CameraCaptureManager)
+		FString FrameNumberStr = FString::Printf(TEXT("%07d"), ImageIndex);
+		FString rgb_filename = FPaths::Combine(*CameraPath, FString::Printf(TEXT("frame_%s.exr"), *FrameNumberStr));
+		FString dmv_filename = FPaths::Combine(*CameraPath, FString::Printf(TEXT("frame_%s_motion.exr"), *FrameNumberStr));
+		FString metadata_filename = FPaths::Combine(*CameraPath, FString::Printf(TEXT("frame_%s.json"), *FrameNumberStr));
+
+		// Use shared utility functions
+		// Write RGB+Depth EXR (RGB in RGB channels, Depth in Alpha channel)
+		CameraCaptureUtils::WriteEXRFile(rgb_filename, rgb_data, dmv_data, rgb_rt->SizeX, rgb_rt->SizeY, true);
+
+		// Write Motion Vectors EXR (X in R, Y in G channels)
+		CameraCaptureUtils::WriteEXRFile(dmv_filename, dmv_data, dmv_data, dmv_rt->SizeX, dmv_rt->SizeY, false);
+
+		// Write metadata JSON
+		FString ActorPath = GetOwner() ? GetOwner()->GetPathName() : TEXT("");
+		FString LevelName = GetWorld() ? GetWorld()->GetName() : TEXT("");
+		float Timestamp = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+		
+		CameraCaptureUtils::WriteMetadataFile(metadata_filename, rgb, Intrinsics, ImageIndex, Timestamp, ActorPath, LevelName);
 	}
+
 	// now update the state variable for which image we're on
 	ImageIndex++;
 }
 
-AsyncSaveImageToDiskTask::AsyncSaveImageToDiskTask(TArray<FLinearColor> Image, FString ImageName, int _width, int _height)
-{
-	ImageCopy = Image;
-	FileName = ImageName;
-	width = _width;
-	height = _height;
-}
-
-AsyncSaveImageToDiskTask::~AsyncSaveImageToDiskTask()
-{
-}
-
-void AsyncSaveImageToDiskTask::DoWork()
-{
-	const int numChannels = 4;
-	const int numBytesPerChannel = sizeof(float);
-
-	FText PathError;
-	FPaths::ValidatePath(FileName, &PathError);
-	if (PathError.IsEmpty() && !FileName.IsEmpty())
-	{
-		auto Ar = IFileManager::Get().CreateFileWriter(*FileName);
-		if (Ar)
-		{
-			FBufferArchive rawBytes;
-			size_t		   bufferSize = ImageCopy.Num() * numBytesPerChannel * numChannels;
-			rawBytes.Init(0, bufferSize);
-			for (int y = height - 1; y >= 0; y--)
-			{
-				for (int x = 0; x < width; x++)
-				{
-					int	  index = x + y * width;
-					int	  offset = index * (numChannels * numBytesPerChannel);
-					float _floats[numChannels] = {
-						ImageCopy[index].R, // depth
-						ImageCopy[index].G, // motion x
-						ImageCopy[index].B, // motion y
-						ImageCopy[index].A, // unused
-					};
-					memcpy(&rawBytes.GetData()[offset], &_floats, numBytesPerChannel * numChannels);
-				}
-			}
-			Ar->Serialize(rawBytes.GetData(), rawBytes.Num());
-			delete Ar;
-		}
-		else
-		{
-			UE_LOG(LogTemp, Error, TEXT("Bad Ar!"));
-		}
-	}
-	else
-	{
-		UE_LOG(LogTemp, Error, TEXT("Invalid file path provdied: %s!"), *PathError.ToString());
-	}
-}
