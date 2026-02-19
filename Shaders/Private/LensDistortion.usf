@@ -1,0 +1,192 @@
+// LensDistortion.usf
+    // Multi-projection lens distortion shader for CameraCapture plugin
+    // Include from Custom HLSL node: #include "/CameraCapture/Private/LensDistortion.usf"
+
+    #ifndef LENS_DISTORTION_USF
+    #define LENS_DISTORTION_USF
+
+    static const float CC_PI = 3.14159265358979323846;
+
+    // ============================================================================
+    // Panini Projection (renamed to avoid engine conflicts)
+    // D = 0: rectilinear, D = 1: cylindrical stereographic
+    // S = vertical squeeze factor
+    // ============================================================================
+    float2 CC_PaniniProjection(float2 CenteredUV, float D, float S)
+    {
+        float Theta = atan(CenteredUV.x);
+        float CosTheta = cos(Theta);
+        float SinTheta = sin(Theta);
+
+        float Denom = max(D * CosTheta + (1.0 - D), 0.001);
+
+        float PaniniX = SinTheta * ((D + 1.0) / Denom);
+        float PaniniY = CenteredUV.y / (Denom * lerp(1.0, CosTheta, S));
+
+        return float2(PaniniX, PaniniY);
+    }
+
+    // ============================================================================
+    // Barrel / Brown-Conrady Distortion (OpenCV model)
+    // K1, K2, K3 = radial coefficients
+    // P1, P2    = tangential coefficients
+    // ============================================================================
+    float2 CC_BarrelDistortion(float2 CenteredUV, float K1, float K2, float K3, float P1, float P2)
+    {
+        float R2 = dot(CenteredUV, CenteredUV);
+        float R4 = R2 * R2;
+        float R6 = R4 * R2;
+
+        float RadialFactor = 1.0 + K1 * R2 + K2 * R4 + K3 * R6;
+
+        float2 Distorted;
+        Distorted.x = CenteredUV.x * RadialFactor
+                    + 2.0 * P1 * CenteredUV.x * CenteredUV.y
+                    + P2 * (R2 + 2.0 * CenteredUV.x * CenteredUV.x);
+        Distorted.y = CenteredUV.y * RadialFactor
+                    + P1 * (R2 + 2.0 * CenteredUV.y * CenteredUV.y)
+                    + 2.0 * P2 * CenteredUV.x * CenteredUV.y;
+
+        return Distorted;
+    }
+
+    // ============================================================================
+    // Fisheye / Equidistant Projection
+    // r_fisheye = f * theta
+    // FisheyeFOVRad = total FOV in radians
+    // ============================================================================
+    float2 CC_FisheyeProjection(float2 CenteredUV, float FisheyeFOVRad)
+    {
+        float R = length(CenteredUV);
+        if (R < 0.0001)
+            return CenteredUV;
+
+        float ThetaRect = atan(R);
+        float MaxTheta = max(FisheyeFOVRad * 0.5, 0.001);
+        float FisheyeR = ThetaRect / MaxTheta;
+
+        return CenteredUV * (FisheyeR / R);
+    }
+
+    // ============================================================================
+    // Spherical / Equirectangular Projection
+    // ============================================================================
+    float2 CC_SphericalProjection(float2 CenteredUV)
+    {
+        float Phi   = atan(CenteredUV.x);
+        float Theta = atan(CenteredUV.y);
+
+        float NormFactor = 4.0 / CC_PI;
+        return float2(Phi * NormFactor, Theta * NormFactor);
+    }
+
+    // ============================================================================
+    // Chromatic Aberration Helper
+    // ChannelSign: -1 for Red (inward), 0 for Green (none), +1 for Blue (outward)
+    // ============================================================================
+    float2 CC_ApplyChromaticOffset(float2 CenteredUV, float ChromaShift, float ChannelSign)
+    {
+        float R = length(CenteredUV);
+        float Scale = 1.0 + ChannelSign * ChromaShift * R;
+        return CenteredUV * Scale;
+    }
+
+    // ============================================================================
+    // Internal: apply distortion to centered UV based on mode
+    // ============================================================================
+    float2 CC_DistortCenteredUV(
+        float2 CenteredUV,
+        int ProjectionMode,
+        float K1, float K2, float K3,
+        float P1, float P2,
+        float PaniniD, float PaniniS,
+        float FisheyeFOVDeg)
+    {
+        float2 DistortedUV = CenteredUV;
+
+        if (ProjectionMode == 1)
+        {
+            DistortedUV = CC_PaniniProjection(CenteredUV, PaniniD, PaniniS);
+        }
+        else if (ProjectionMode == 2)
+        {
+            DistortedUV = CC_BarrelDistortion(CenteredUV, K1, K2, K3, P1, P2);
+        }
+        else if (ProjectionMode == 3)
+        {
+            float FOVRad = FisheyeFOVDeg * (CC_PI / 180.0);
+            DistortedUV = CC_FisheyeProjection(CenteredUV, FOVRad);
+        }
+        else if (ProjectionMode == 4)
+        {
+            DistortedUV = CC_SphericalProjection(CenteredUV);
+        }
+
+        return DistortedUV;
+    }
+
+    // ============================================================================
+    // Main Entry Point - Returns distorted UV in [0,1] space
+    // ============================================================================
+    float2 CC_ApplyLensDistortion(
+        float2 UV,
+        int ProjectionMode,
+        float DistortionStrength,
+        float K1, float K2, float K3,
+        float P1, float P2,
+        float PaniniD, float PaniniS,
+        float FisheyeFOVDeg,
+        float2 PrincipalPointOffset,
+        float AspectRatio)
+    {
+        float2 CenteredUV = (UV - 0.5) * 2.0 - PrincipalPointOffset * 2.0;
+        CenteredUV.x *= AspectRatio;
+
+        float2 DistortedUV = CC_DistortCenteredUV(CenteredUV, ProjectionMode,
+            K1, K2, K3, P1, P2, PaniniD, PaniniS, FisheyeFOVDeg);
+
+        DistortedUV = lerp(CenteredUV, DistortedUV, DistortionStrength);
+        DistortedUV.x /= AspectRatio;
+
+        float2 FinalUV = (DistortedUV + PrincipalPointOffset * 2.0) * 0.5 + 0.5;
+        return FinalUV;
+    }
+
+    // ============================================================================
+    // Per-channel entry point for chromatic aberration
+    // ChannelSign: -1.0 for Red, 0.0 for Green, 1.0 for Blue
+    // ============================================================================
+    float2 CC_ApplyLensDistortionChroma(
+        float2 UV,
+        int ProjectionMode,
+        float DistortionStrength,
+        float K1, float K2, float K3,
+        float P1, float P2,
+        float PaniniD, float PaniniS,
+        float FisheyeFOVDeg,
+        float2 PrincipalPointOffset,
+        float AspectRatio,
+        float ChromaShift,
+        float ChannelSign)
+    {
+        float2 CenteredUV = (UV - 0.5) * 2.0 - PrincipalPointOffset * 2.0;
+        CenteredUV.x *= AspectRatio;
+
+        float2 ChromaUV = CenteredUV;
+        if (abs(ChromaShift) > 0.0001 && abs(ChannelSign) > 0.0001)
+        {
+            ChromaUV = CC_ApplyChromaticOffset(CenteredUV, ChromaShift, ChannelSign);
+        }
+
+        float2 DistortedUV = CC_DistortCenteredUV(ChromaUV, ProjectionMode,
+            K1, K2, K3, P1, P2, PaniniD, PaniniS, FisheyeFOVDeg);
+
+        DistortedUV = lerp(ChromaUV, DistortedUV, DistortionStrength);
+        DistortedUV.x /= AspectRatio;
+
+        float2 FinalUV = (DistortedUV + PrincipalPointOffset * 2.0) * 0.5 + 0.5;
+        return FinalUV;
+    }
+
+    #endif // LENS_DISTORTION_USF
+    
