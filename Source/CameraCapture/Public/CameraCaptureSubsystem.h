@@ -92,14 +92,26 @@ struct CAMERACAPTURE_API FCaptureData
 	/** Projection matrix used (if custom) */
 	FMatrix ProjectionMatrix;
 
-	/** Image pixel data (RGBA) */
-	TArray<FColor> ImageData;
+	/** RGB image pixel data (Linear color, HDR) */
+	TArray<FLinearColor> RgbData;
 
-	/** Depth data (in cm, world-space) */
-	TArray<float> DepthData;
+	/** DMV (Depth+Motion+Velocity) data (R=Depth in cm, G=Motion X, B=Motion Y) */
+	TArray<FLinearColor> DmvData;
 
-	/** Motion vector data (pixels per frame, 2D) */
-	TArray<FVector2D> MotionVectorData;
+	/** Cached pointer to source camera (for serialization) */
+	TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D> CameraPtr;
+
+	/** Completion tracking flags */
+	bool bRgbComplete = false;
+	bool bDmvComplete = false;
+	bool bNeedsRgb = true;
+	bool bNeedsDmv = true;
+
+	/** Check if all required captures are complete */
+	bool IsFullyComplete() const
+	{
+		return (!bNeedsRgb || bRgbComplete) && (!bNeedsDmv || bDmvComplete);
+	}
 
 	/** Image width in pixels */
 	UPROPERTY(BlueprintReadOnly, Category = "Capture Data")
@@ -256,17 +268,8 @@ protected:
 	/** Process completed capture data */
 	void ProcessCompletedCapture(UIntrinsicSceneCaptureComponent2D* Camera, const FCameraIdentifier& CameraID);
 
-	/** Capture data from a single camera */
-	bool CaptureCameraData(UIntrinsicSceneCaptureComponent2D* Camera, FCaptureData& OutData);
-
-	/** Serialize capture data to disk */
+	/** Serialize capture data to disk using shared utilities */
 	void SerializeCaptureData(const FCaptureData& Data);
-
-	/** Write EXR file with 6 channels (RGB + Depth + Motion) */
-	bool WriteEXRFile(const FString& FilePath, const FCaptureData& Data);
-
-	/** Write metadata JSON file */
-	bool WriteMetadataFile(const FString& FilePath, const FCaptureData& Data);
 
 	/** Generate unique camera ID, handling collisions */
 	FCameraIdentifier GenerateCameraID(UIntrinsicSceneCaptureComponent2D* Camera);
@@ -340,4 +343,28 @@ private:
 
 	/** Cameras waiting for DMV capture completion */
 	TSet<TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D>> CamerasAwaitingDMV;
+
+	/** Buffer pool for reusing memory allocations across frames */
+	struct FCameraBuffers
+	{
+		TArray<FLinearColor> RgbBuffer;
+		TArray<FLinearColor> DmvBuffer;
+		int32 LastFrameUsed = 0;
+
+		void EnsureSize(int32 Width, int32 Height)
+		{
+			int32 NumPixels = Width * Height;
+			if (RgbBuffer.Num() != NumPixels)
+			{
+				RgbBuffer.SetNumUninitialized(NumPixels);
+				DmvBuffer.SetNumUninitialized(NumPixels);
+			}
+		}
+	};
+
+	/** Buffer pool per camera to avoid per-frame allocations */
+	TMap<TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D>, FCameraBuffers> BufferPool;
+
+	/** Flag for fast tick check */
+	bool bHasPendingCaptures = false;
 };

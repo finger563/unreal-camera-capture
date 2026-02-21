@@ -135,7 +135,7 @@ TStatId UCameraCaptureSubsystem::GetStatId() const
 bool UCameraCaptureSubsystem::IsTickable() const
 {
 	// Tick if we have pending captures or are actively capturing
-	return IsInitialized() && (bIsCapturing || PendingCaptureData.Num() > 0) && !IsTemplate();
+	return IsInitialized() && (bIsCapturing || bHasPendingCaptures) && !IsTemplate();
 }
 
 void UCameraCaptureSubsystem::OnWorldBeginPlay(UWorld& InWorld)
@@ -313,6 +313,9 @@ void UCameraCaptureSubsystem::UnregisterCamera(UIntrinsicSceneCaptureComponent2D
 		DmvCameras.Remove(Camera);
 		DmvRenderTargets.Remove(Camera);
 
+		// PERFORMANCE: Clean up buffer pool entry
+		BufferPool.Remove(Camera);
+
 		CameraIDMap.Remove(Camera);
 	}
 }
@@ -457,14 +460,13 @@ FCaptureStatistics UCameraCaptureSubsystem::GetStatistics() const
 
 void UCameraCaptureSubsystem::ExecuteSynchronizedCapture()
 {
-	double StartTime = FPlatformTime::Seconds();
-
 	UE_LOG(LogTemp, Verbose, TEXT("[CameraCaptureSubsystem] ExecuteSynchronizedCapture: %d registered cameras"), RegisteredCameras.Num());
 
 	// Clear any previous pending data
 	PendingCaptureData.Empty();
 	CamerasAwaitingRGB.Empty();
 	CamerasAwaitingDMV.Empty();
+	bHasPendingCaptures = false;
 
 	int32 InitiatedCount = 0;
 
@@ -496,6 +498,11 @@ void UCameraCaptureSubsystem::ExecuteSynchronizedCapture()
 		InitiatedCount++;
 	}
 
+	if (InitiatedCount > 0)
+	{
+		bHasPendingCaptures = true;
+	}
+
 	UE_LOG(LogTemp, Verbose, TEXT("[CameraCaptureSubsystem] Initiated deferred capture for %d cameras"), InitiatedCount);
 }
 
@@ -511,6 +518,7 @@ void UCameraCaptureSubsystem::InitiateDeferredCapture(UIntrinsicSceneCaptureComp
 	// Initialize capture data for this camera
 	FCaptureData& CaptureData = PendingCaptureData.FindOrAdd(Camera);
 	CaptureData.CameraID = CameraID;
+	CaptureData.CameraPtr = Camera;  // Cache pointer for serialization
 	CaptureData.FrameNumber = FrameIdCounter;
 	CaptureData.Timestamp = FPlatformTime::Seconds() - CaptureStartTime;
 	CaptureData.WorldTransform = Camera->GetComponentTransform();
@@ -537,14 +545,26 @@ void UCameraCaptureSubsystem::InitiateDeferredCapture(UIntrinsicSceneCaptureComp
 	FCameraIntrinsics Intrinsics = Camera->GetActiveIntrinsics();
 	int32 Width = Intrinsics.ImageWidth;
 	int32 Height = Intrinsics.ImageHeight;
+	int32 NumPixels = Width * Height;
 	CaptureData.Width = Width;
 	CaptureData.Height = Height;
+
+	// PERFORMANCE: Get pre-allocated buffers from pool and assign to CaptureData
+	// This reuses the same memory allocation across frames
+	FCameraBuffers& Buffers = BufferPool.FindOrAdd(Camera);
+	Buffers.EnsureSize(Width, Height);
+	Buffers.LastFrameUsed = FrameIdCounter;
+
+	// Assign pooled buffers to CaptureData (these are already allocated)
+	// ReadLinearColorPixels will write directly into these pre-allocated arrays
+	CaptureData.RgbData = Buffers.RgbBuffer;
+	CaptureData.DmvData = Buffers.DmvBuffer;
 
 	// Ensure camera has a render target for RGB
 	if (!Camera->TextureTarget)
 	{
 		UTextureRenderTarget2D* NewRenderTarget = NewObject<UTextureRenderTarget2D>(Camera);
-		NewRenderTarget->RenderTargetFormat = RTF_RGBA8;
+		NewRenderTarget->RenderTargetFormat = RTF_RGBA32f; // Use HDR format like CaptureComponent
 		NewRenderTarget->InitAutoFormat(Width, Height);
 		NewRenderTarget->UpdateResourceImmediate(true);
 
@@ -554,20 +574,26 @@ void UCameraCaptureSubsystem::InitiateDeferredCapture(UIntrinsicSceneCaptureComp
 			Width, Height, *CameraID.ToString());
 	}
 
-	// Track what we're waiting for
-	bool bWaitingForRGB = false;
-	bool bWaitingForDMV = false;
+	// Set completion requirements (PERFORMANCE: Skip disabled channels)
+	CaptureData.bNeedsRgb = bCaptureRGB;
+	CaptureData.bNeedsDmv = (bCaptureDepth || bCaptureMotionVectors);
+	CaptureData.bRgbComplete = false;
+	CaptureData.bDmvComplete = false;
 
-	// === Initiate RGB Capture ===
+	// === Initiate RGB Capture (only if enabled) ===
 	if (bCaptureRGB)
 	{
 		Camera->CaptureSceneDeferred();
 		CamerasAwaitingRGB.Add(Camera);
-		bWaitingForRGB = true;
 		UE_LOG(LogTemp, VeryVerbose, TEXT("[CameraCaptureSubsystem] Initiated deferred RGB capture for %s"), *CameraID.ToString());
 	}
+	else
+	{
+		CaptureData.bRgbComplete = true;  // Mark as complete if not needed
+		UE_LOG(LogTemp, VeryVerbose, TEXT("[CameraCaptureSubsystem] Skipped RGB capture (disabled) for %s"), *CameraID.ToString());
+	}
 
-	// === Initiate Depth + Motion Vector Capture ===
+	// === Initiate Depth + Motion Vector Capture (only if enabled) ===
 	if (bCaptureDepth || bCaptureMotionVectors)
 	{
 		TWeakObjectPtr<USceneCaptureComponent2D>* DmvCameraPtr = DmvCameras.Find(Camera);
@@ -577,20 +603,28 @@ void UCameraCaptureSubsystem::InitiateDeferredCapture(UIntrinsicSceneCaptureComp
 			USceneCaptureComponent2D* DmvCamera = DmvCameraPtr->Get();
 			DmvCamera->CaptureSceneDeferred();
 			CamerasAwaitingDMV.Add(Camera);
-			bWaitingForDMV = true;
 			UE_LOG(LogTemp, VeryVerbose, TEXT("[CameraCaptureSubsystem] Initiated deferred DMV capture for %s"), *CameraID.ToString());
 		}
 		else
 		{
 			// DMV camera not available, fill with zeros
-			CaptureData.DepthData.SetNumZeroed(Width * Height);
-			CaptureData.MotionVectorData.SetNumZeroed(Width * Height);
+			CaptureData.DmvData = Buffers.DmvBuffer;  // Use pooled buffer
+			for (FLinearColor& Pixel : CaptureData.DmvData)
+			{
+				Pixel = FLinearColor::Black;
+			}
+			CaptureData.bDmvComplete = true;
 			UE_LOG(LogTemp, VeryVerbose, TEXT("[CameraCaptureSubsystem] No DMV camera available for %s"), *CameraID.ToString());
 		}
 	}
+	else
+	{
+		CaptureData.bDmvComplete = true;  // Mark as complete if not needed
+		UE_LOG(LogTemp, VeryVerbose, TEXT("[CameraCaptureSubsystem] Skipped DMV capture (disabled) for %s"), *CameraID.ToString());
+	}
 
 	// If not waiting for anything, process immediately
-	if (!bWaitingForRGB && !bWaitingForDMV)
+	if (CaptureData.IsFullyComplete())
 	{
 		ProcessCompletedCapture(Camera, CameraID);
 	}
@@ -598,16 +632,17 @@ void UCameraCaptureSubsystem::InitiateDeferredCapture(UIntrinsicSceneCaptureComp
 
 void UCameraCaptureSubsystem::ProcessDeferredCaptures()
 {
-	static double LastProcessTime = 0.0;
 	double StartTime = FPlatformTime::Seconds();
 
+	// PERFORMANCE: Iterator-based removal (avoid building intermediate arrays)
 	// Process RGB captures
-	TArray<TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D>> CompletedRGB;
-	for (TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D> WeakCamera : CamerasAwaitingRGB)
+	for (auto It = CamerasAwaitingRGB.CreateIterator(); It; ++It)
 	{
+		TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D> WeakCamera = *It;
+
 		if (!WeakCamera.IsValid())
 		{
-			CompletedRGB.Add(WeakCamera);
+			It.RemoveCurrent();
 			continue;
 		}
 
@@ -617,7 +652,7 @@ void UCameraCaptureSubsystem::ProcessDeferredCaptures()
 		if (!RenderTarget)
 		{
 			UE_LOG(LogTemp, Warning, TEXT("[CameraCaptureSubsystem] No render target for RGB capture"));
-			CompletedRGB.Add(WeakCamera);
+			It.RemoveCurrent();
 			continue;
 		}
 
@@ -627,14 +662,16 @@ void UCameraCaptureSubsystem::ProcessDeferredCaptures()
 			FCaptureData* CaptureData = PendingCaptureData.Find(Camera);
 			if (CaptureData)
 			{
-				CaptureData->ImageData.SetNum(CaptureData->Width * CaptureData->Height);
-				if (RTResource->ReadPixels(CaptureData->ImageData))
+				// PERFORMANCE: Read directly into pre-allocated buffer (no allocation or copy)
+				if (RTResource->ReadLinearColorPixels(CaptureData->RgbData))
 				{
-					UE_LOG(LogTemp, VeryVerbose, TEXT("[CameraCaptureSubsystem] RGB capture complete for %s"), *CaptureData->CameraID.ToString());
-					CompletedRGB.Add(WeakCamera);
+					CaptureData->bRgbComplete = true;
 
-					// Check if we're also done with DMV
-					if (!CamerasAwaitingDMV.Contains(WeakCamera))
+					UE_LOG(LogTemp, VeryVerbose, TEXT("[CameraCaptureSubsystem] RGB capture complete for %s"), *CaptureData->CameraID.ToString());
+					It.RemoveCurrent();
+
+					// PERFORMANCE: Direct completion check (no TSet lookup)
+					if (CaptureData->IsFullyComplete())
 					{
 						ProcessCompletedCapture(Camera, CaptureData->CameraID);
 					}
@@ -643,19 +680,14 @@ void UCameraCaptureSubsystem::ProcessDeferredCaptures()
 		}
 	}
 
-	// Remove completed RGB captures
-	for (TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D> WeakCamera : CompletedRGB)
-	{
-		CamerasAwaitingRGB.Remove(WeakCamera);
-	}
-
 	// Process DMV captures
-	TArray<TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D>> CompletedDMV;
-	for (TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D> WeakCamera : CamerasAwaitingDMV)
+	for (auto It = CamerasAwaitingDMV.CreateIterator(); It; ++It)
 	{
+		TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D> WeakCamera = *It;
+
 		if (!WeakCamera.IsValid())
 		{
-			CompletedDMV.Add(WeakCamera);
+			It.RemoveCurrent();
 			continue;
 		}
 
@@ -664,7 +696,7 @@ void UCameraCaptureSubsystem::ProcessDeferredCaptures()
 
 		if (!DmvCameraPtr || !DmvCameraPtr->IsValid())
 		{
-			CompletedDMV.Add(WeakCamera);
+			It.RemoveCurrent();
 			continue;
 		}
 
@@ -673,7 +705,7 @@ void UCameraCaptureSubsystem::ProcessDeferredCaptures()
 
 		if (!DmvRT)
 		{
-			CompletedDMV.Add(WeakCamera);
+			It.RemoveCurrent();
 			continue;
 		}
 
@@ -683,46 +715,39 @@ void UCameraCaptureSubsystem::ProcessDeferredCaptures()
 			FCaptureData* CaptureData = PendingCaptureData.Find(Camera);
 			if (CaptureData)
 			{
-				TArray<FLinearColor> DmvPixels;
-				DmvPixels.SetNum(CaptureData->Width * CaptureData->Height);
-
-				if (DmvResource->ReadLinearColorPixels(DmvPixels))
+				// PERFORMANCE: Use pooled buffer instead of allocating
+				FCameraBuffers* Buffers = BufferPool.Find(Camera);
+				if (Buffers)
 				{
-					CaptureData->DepthData.SetNum(CaptureData->Width * CaptureData->Height);
-					CaptureData->MotionVectorData.SetNum(CaptureData->Width * CaptureData->Height);
-
-					// Decode: R=Depth (cm), G=MotionX (px/frame), B=MotionY (px/frame)
-					for (int32 i = 0; i < DmvPixels.Num(); i++)
+					if (DmvResource->ReadLinearColorPixels(Buffers->DmvBuffer))
 					{
-						CaptureData->DepthData[i] = DmvPixels[i].R;
-						CaptureData->MotionVectorData[i] = FVector2D(DmvPixels[i].G, DmvPixels[i].B);
-					}
+						// Swap pooled buffer into capture data (zero-copy)
+						CaptureData->DmvData = Buffers->DmvBuffer;
+						CaptureData->bDmvComplete = true;
 
-					UE_LOG(LogTemp, VeryVerbose, TEXT("[CameraCaptureSubsystem] DMV capture complete for %s"), *CaptureData->CameraID.ToString());
-					CompletedDMV.Add(WeakCamera);
+						UE_LOG(LogTemp, VeryVerbose, TEXT("[CameraCaptureSubsystem] DMV capture complete for %s"), *CaptureData->CameraID.ToString());
+						It.RemoveCurrent();
 
-					// Check if we're also done with RGB
-					if (!CamerasAwaitingRGB.Contains(WeakCamera))
-					{
-						ProcessCompletedCapture(Camera, CaptureData->CameraID);
+						// PERFORMANCE: Direct completion check (no TSet lookup)
+						if (CaptureData->IsFullyComplete())
+						{
+							ProcessCompletedCapture(Camera, CaptureData->CameraID);
+						}
 					}
 				}
 			}
 		}
 	}
 
-	// Remove completed DMV captures
-	for (TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D> WeakCamera : CompletedDMV)
-	{
-		CamerasAwaitingDMV.Remove(WeakCamera);
-	}
-
 	double EndTime = FPlatformTime::Seconds();
 	double ProcessTime = (EndTime - StartTime) * 1000.0;
-	if (ProcessTime > 1.0)
+	
+	#if !UE_BUILD_SHIPPING
+	if (ProcessTime > 1.0 && UE_LOG_ACTIVE(LogTemp, VeryVerbose))
 	{
 		UE_LOG(LogTemp, VeryVerbose, TEXT("[CameraCaptureSubsystem] ProcessDeferredCaptures took %.2fms"), ProcessTime);
 	}
+	#endif
 }
 
 void UCameraCaptureSubsystem::ProcessCompletedCapture(UIntrinsicSceneCaptureComponent2D* Camera, const FCameraIdentifier& CameraID)
@@ -751,8 +776,9 @@ void UCameraCaptureSubsystem::ProcessCompletedCapture(UIntrinsicSceneCaptureComp
 	// Check if all cameras are done for this frame
 	if (PendingCaptureData.Num() == 0 && CamerasAwaitingRGB.Num() == 0 && CamerasAwaitingDMV.Num() == 0)
 	{
-		// Frame complete, increment counter
+		// Frame complete, increment counter and clear flag
 		FrameIdCounter++;
+		bHasPendingCaptures = false;
 
 		double EndTime = FPlatformTime::Seconds();
 		LastCaptureDurationMs = (EndTime - CaptureStartTime) * 1000.0f;
@@ -772,156 +798,10 @@ void UCameraCaptureSubsystem::ProcessCompletedCapture(UIntrinsicSceneCaptureComp
 	}
 }
 
-// Legacy synchronous capture method - kept for backward compatibility but not used
-bool UCameraCaptureSubsystem::CaptureCameraData(UIntrinsicSceneCaptureComponent2D* Camera, FCaptureData& OutData)
-{
-	if (!Camera)
-	{
-		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Null camera pointer"));
-		return false;
-	}
-
-	// Get camera identifier
-	FCameraIdentifier* CameraID = CameraIDMap.Find(Camera);
-	if (!CameraID)
-	{
-		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Camera not found in ID map: %s"), *Camera->GetName());
-		return false;
-	}
-
-	UE_LOG(LogTemp, Verbose, TEXT("[CameraCaptureSubsystem] Capturing from camera: %s"), *CameraID->ToString());
-
-	OutData.CameraID = *CameraID;
-	OutData.FrameNumber = FrameIdCounter;
-	OutData.Timestamp = FPlatformTime::Seconds() - CaptureStartTime;
-
-	// Get world transform
-	OutData.WorldTransform = Camera->GetComponentTransform();
-
-	// Get intrinsics
-	OutData.Intrinsics = Camera->GetActiveIntrinsics();
-	OutData.bUsedCustomProjectionMatrix = Camera->bUseCustomProjectionMatrix;
-	if (OutData.bUsedCustomProjectionMatrix)
-	{
-		OutData.ProjectionMatrix = Camera->CustomProjectionMatrix;
-	}
-
-	// Get actor path and level name
-	if (AActor* Owner = Camera->GetOwner())
-	{
-		OutData.ActorPath = Owner->GetPathName();
-	}
-
-	UWorld* World = GetWorld();
-	if (World)
-	{
-		OutData.LevelName = World->GetMapName();
-	}
-
-	// Get intrinsics for render target creation
-	FCameraIntrinsics Intrinsics = Camera->GetActiveIntrinsics();
-	int32			  Width = Intrinsics.ImageWidth;
-	int32			  Height = Intrinsics.ImageHeight;
-
-	// Ensure camera has a render target for RGB
-	if (!Camera->TextureTarget)
-	{
-		UTextureRenderTarget2D* NewRenderTarget = NewObject<UTextureRenderTarget2D>(Camera);
-		NewRenderTarget->RenderTargetFormat = RTF_RGBA8;
-		NewRenderTarget->InitAutoFormat(Width, Height);
-		NewRenderTarget->UpdateResourceImmediate(true);
-
-		Camera->TextureTarget = NewRenderTarget;
-
-		UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Created dynamic RGB render target (%dx%d) for camera %s"),
-			Width, Height, *CameraID->ToString());
-	}
-
-	// === RGB Capture ===
-	if (bCaptureRGB)
-	{
-		Camera->CaptureScene();
-
-		UTextureRenderTarget2D* RenderTarget = Camera->TextureTarget;
-		OutData.Width = RenderTarget->SizeX;
-		OutData.Height = RenderTarget->SizeY;
-
-		FTextureRenderTargetResource* RTResource = RenderTarget->GameThread_GetRenderTargetResource();
-		if (RTResource)
-		{
-			OutData.ImageData.SetNum(OutData.Width * OutData.Height);
-			if (!RTResource->ReadPixels(OutData.ImageData))
-			{
-				UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Failed to read RGB pixels from %s"), *CameraID->ToString());
-				return false;
-			}
-		}
-		else
-		{
-			UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] No render target resource for %s"), *CameraID->ToString());
-			return false;
-		}
-	}
-
-	// === Depth + Motion Vector Capture using separate DMV camera ===
-	if ((bCaptureDepth || bCaptureMotionVectors))
-	{
-		// Look up the DMV camera we created during registration
-		TWeakObjectPtr<USceneCaptureComponent2D>* DmvCameraPtr = DmvCameras.Find(Camera);
-
-		if (DmvCameraPtr && DmvCameraPtr->IsValid())
-		{
-			USceneCaptureComponent2D* DmvCamera = DmvCameraPtr->Get();
-
-			// Capture depth+motion
-			DmvCamera->CaptureScene();
-
-			UTextureRenderTarget2D* DmvRT = DmvCamera->TextureTarget;
-			if (DmvRT)
-			{
-				FTextureRenderTargetResource* DmvResource = DmvRT->GameThread_GetRenderTargetResource();
-
-				if (DmvResource)
-				{
-					TArray<FLinearColor> DmvPixels;
-					DmvPixels.SetNum(Width * Height);
-
-					if (DmvResource->ReadLinearColorPixels(DmvPixels))
-					{
-						OutData.DepthData.SetNum(Width * Height);
-						OutData.MotionVectorData.SetNum(Width * Height);
-
-						// Decode: R=Depth (cm), G=MotionX (px/frame), B=MotionY (px/frame), A=1
-						for (int32 i = 0; i < DmvPixels.Num(); i++)
-						{
-							OutData.DepthData[i] = DmvPixels[i].R;
-							OutData.MotionVectorData[i] = FVector2D(DmvPixels[i].G, DmvPixels[i].B);
-						}
-
-						UE_LOG(LogTemp, Verbose, TEXT("[CameraCaptureSubsystem] Captured depth+motion from DMV camera for %s"), *CameraID->ToString());
-					}
-					else
-					{
-						UE_LOG(LogTemp, Warning, TEXT("[CameraCaptureSubsystem] Failed to read depth+motion pixels from %s"), *CameraID->ToString());
-					}
-				}
-			}
-		}
-		else
-		{
-			// DMV camera not set up (material might not have loaded)
-			OutData.DepthData.SetNumZeroed(Width * Height);
-			OutData.MotionVectorData.SetNumZeroed(Width * Height);
-			UE_LOG(LogTemp, VeryVerbose, TEXT("[CameraCaptureSubsystem] No DMV camera available for %s"), *CameraID->ToString());
-		}
-	}
-
-	return true;
-}
 
 void UCameraCaptureSubsystem::SerializeCaptureData(const FCaptureData& Data)
 {
-	// Convert relative path to absolute path (same as original CaptureComponent)
+	// Convert relative path to absolute path
 	FString AbsoluteOutputDir = OutputDirectory;
 	if (FPaths::IsRelative(AbsoluteOutputDir))
 	{
@@ -931,9 +811,7 @@ void UCameraCaptureSubsystem::SerializeCaptureData(const FCaptureData& Data)
 	// Create directory structure: OutputDir/ActorName/CameraName/
 	FString CameraPath = Data.CameraID.GetFullPath(AbsoluteOutputDir);
 
-	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Absolute path: %s"), *CameraPath);
-
-	// Create directory using IFileManager (same as original CaptureComponent)
+	// Create directory using IFileManager
 	if (!IFileManager::Get().DirectoryExists(*CameraPath))
 	{
 		if (!IFileManager::Get().MakeDirectory(*CameraPath, true))
@@ -943,170 +821,39 @@ void UCameraCaptureSubsystem::SerializeCaptureData(const FCaptureData& Data)
 		}
 	}
 
-	// Verify directory was created
-	if (!IFileManager::Get().DirectoryExists(*CameraPath))
-	{
-		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Directory does not exist after creation: %s"), *CameraPath);
-		return;
-	}
-
-	// Generate frame filename (frame_0000000.exr)
+	// Generate frame filename (frame_0000000.exr format, matching CaptureComponent)
 	FString FrameNumberStr = FString::Printf(TEXT("%07lld"), Data.FrameNumber);
-
-	// Write EXR file with all channels (use absolute path)
-	FString ExrPath = FPaths::Combine(CameraPath, FString::Printf(TEXT("frame_%s.exr"), *FrameNumberStr));
-
-	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Writing EXR: %s"), *ExrPath);
-
-	bool bSuccess = WriteEXRFile(ExrPath, Data);
-
-	if (!bSuccess)
-	{
-		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Failed to write EXR: %s"), *ExrPath);
-		return;
-	}
-
-	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Submitted EXR write task: %s"), *ExrPath);
-
-	// Write metadata JSON (separate from EXR for easy access)
+	FString RgbFilePath = FPaths::Combine(CameraPath, FString::Printf(TEXT("frame_%s.exr"), *FrameNumberStr));
+	FString DmvFilePath = FPaths::Combine(CameraPath, FString::Printf(TEXT("frame_%s_motion.exr"), *FrameNumberStr));
 	FString MetadataPath = FPaths::Combine(CameraPath, FString::Printf(TEXT("frame_%s.json"), *FrameNumberStr));
-	WriteMetadataFile(MetadataPath, Data);
-}
 
-bool UCameraCaptureSubsystem::WriteEXRFile(const FString& FilePath, const FCaptureData& Data)
-{
-	// Safety checks
-	if (Data.Width <= 0 || Data.Height <= 0)
+	// Use shared utility functions from CaptureComponent
+	// Write RGB+Depth EXR (RGB in RGB channels, Depth in Alpha channel)
+	if (Data.bNeedsRgb && Data.RgbData.Num() > 0)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Invalid image dimensions: %dx%d"), Data.Width, Data.Height);
-		return false;
+		CameraCaptureUtils::WriteEXRFile(RgbFilePath, Data.RgbData, Data.DmvData, Data.Width, Data.Height, true);
 	}
 
-	int32 NumPixels = Data.Width * Data.Height;
-
-	if (Data.ImageData.Num() == 0)
+	// Write Motion Vectors EXR (X in R, Y in G channels)
+	if (Data.bNeedsDmv && Data.DmvData.Num() > 0)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[CameraCaptureSubsystem] No image data to write"));
-		return false;
+		CameraCaptureUtils::WriteEXRFile(DmvFilePath, Data.DmvData, Data.DmvData, Data.Width, Data.Height, false);
 	}
 
-	// Convert FCaptureData format to TArray<FLinearColor> format expected by utility functions
-	TArray<FLinearColor> RgbData;
-	TArray<FLinearColor> DmvData;
-	RgbData.SetNum(NumPixels);
-	DmvData.SetNum(NumPixels);
-
-	// Convert RGB from FColor to FLinearColor
-	if (bCaptureRGB && Data.ImageData.Num() == NumPixels)
+	// PERFORMANCE: Use cached camera pointer (avoid map iteration)
+	if (Data.CameraPtr.IsValid())
 	{
-		for (int32 i = 0; i < NumPixels; i++)
-		{
-			RgbData[i] = FLinearColor(Data.ImageData[i]);
-		}
+		UIntrinsicSceneCaptureComponent2D* Camera = Data.CameraPtr.Get();
+		CameraCaptureUtils::WriteMetadataFile(MetadataPath, Camera, Data.Intrinsics, 
+			Data.FrameNumber, Data.Timestamp, Data.ActorPath, Data.LevelName);
 	}
 	else
 	{
-		for (int32 i = 0; i < NumPixels; i++)
-		{
-			RgbData[i] = FLinearColor::Black;
-		}
-	}
-
-	// Prepare DMV data: Depth in R, Motion X in G, Motion Y in B
-	for (int32 i = 0; i < NumPixels; i++)
-	{
-		float Depth = (bCaptureDepth && Data.DepthData.Num() == NumPixels) ? Data.DepthData[i] : 0.0f;
-		float MotionX = (bCaptureMotionVectors && Data.MotionVectorData.Num() == NumPixels) ? Data.MotionVectorData[i].X : 0.0f;
-		float MotionY = (bCaptureMotionVectors && Data.MotionVectorData.Num() == NumPixels) ? Data.MotionVectorData[i].Y : 0.0f;
-		
-		DmvData[i] = FLinearColor(Depth, MotionX, MotionY, 0.0f);
-	}
-
-	// Use shared utility to write RGB+Depth EXR
-	if (!CameraCaptureUtils::WriteEXRFile(FilePath, RgbData, DmvData, Data.Width, Data.Height, true))
-	{
-		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Failed to write RGB+Depth EXR: %s"), *FilePath);
-		return false;
-	}
-
-	// Write motion vectors to separate file if we have them
-	if (bCaptureMotionVectors && Data.MotionVectorData.Num() == NumPixels)
-	{
-		FString MotionPath = FilePath.Replace(TEXT(".exr"), TEXT("_motion.exr"));
-		if (!CameraCaptureUtils::WriteEXRFile(MotionPath, RgbData, DmvData, Data.Width, Data.Height, false))
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[CameraCaptureSubsystem] Failed to write motion EXR: %s"), *MotionPath);
-		}
-	}
-
-	return true;
-}
-
-bool UCameraCaptureSubsystem::WriteMetadataFile(const FString& FilePath, const FCaptureData& Data)
-{
-	// Create JSON object
-	TSharedPtr<FJsonObject> JsonObject = MakeShared<FJsonObject>();
-
-	JsonObject->SetNumberField(TEXT("frame_number"), Data.FrameNumber);
-	JsonObject->SetNumberField(TEXT("timestamp"), Data.Timestamp);
-	JsonObject->SetStringField(TEXT("camera_id"), Data.CameraID.ToString());
-
-	// World transform
-	TSharedPtr<FJsonObject> TransformJson = MakeShared<FJsonObject>();
-	FVector					Location = Data.WorldTransform.GetLocation();
-	FRotator				Rotation = Data.WorldTransform.Rotator();
-	FVector					Scale = Data.WorldTransform.GetScale3D();
-
-	TArray<TSharedPtr<FJsonValue>> LocationArray;
-	LocationArray.Add(MakeShared<FJsonValueNumber>(Location.X));
-	LocationArray.Add(MakeShared<FJsonValueNumber>(Location.Y));
-	LocationArray.Add(MakeShared<FJsonValueNumber>(Location.Z));
-	TransformJson->SetArrayField(TEXT("location"), LocationArray);
-
-	TArray<TSharedPtr<FJsonValue>> RotationArray;
-	RotationArray.Add(MakeShared<FJsonValueNumber>(Rotation.Pitch));
-	RotationArray.Add(MakeShared<FJsonValueNumber>(Rotation.Yaw));
-	RotationArray.Add(MakeShared<FJsonValueNumber>(Rotation.Roll));
-	TransformJson->SetArrayField(TEXT("rotation"), RotationArray);
-
-	TArray<TSharedPtr<FJsonValue>> ScaleArray;
-	ScaleArray.Add(MakeShared<FJsonValueNumber>(Scale.X));
-	ScaleArray.Add(MakeShared<FJsonValueNumber>(Scale.Y));
-	ScaleArray.Add(MakeShared<FJsonValueNumber>(Scale.Z));
-	TransformJson->SetArrayField(TEXT("scale"), ScaleArray);
-
-	JsonObject->SetObjectField(TEXT("world_transform"), TransformJson);
-
-	// Intrinsics
-	TSharedPtr<FJsonObject> IntrinsicsJson = MakeShared<FJsonObject>();
-	IntrinsicsJson->SetNumberField(TEXT("focal_length_x"), Data.Intrinsics.FocalLengthX);
-	IntrinsicsJson->SetNumberField(TEXT("focal_length_y"), Data.Intrinsics.FocalLengthY);
-	IntrinsicsJson->SetNumberField(TEXT("principal_point_x"), Data.Intrinsics.PrincipalPointX);
-	IntrinsicsJson->SetNumberField(TEXT("principal_point_y"), Data.Intrinsics.PrincipalPointY);
-	IntrinsicsJson->SetNumberField(TEXT("image_width"), Data.Intrinsics.ImageWidth);
-	IntrinsicsJson->SetNumberField(TEXT("image_height"), Data.Intrinsics.ImageHeight);
-	IntrinsicsJson->SetBoolField(TEXT("maintain_y_axis"), Data.Intrinsics.bMaintainYAxis);
-	JsonObject->SetObjectField(TEXT("intrinsics"), IntrinsicsJson);
-
-	JsonObject->SetStringField(TEXT("actor_path"), Data.ActorPath);
-	JsonObject->SetStringField(TEXT("level_name"), Data.LevelName);
-
-	// Serialize to string
-	FString					  OutputString;
-	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutputString);
-	FJsonSerializer::Serialize(JsonObject.ToSharedRef(), Writer);
-
-	// Write to file
-	if (FFileHelper::SaveStringToFile(OutputString, *FilePath))
-	{
-		return true;
-	}
-	else
-	{
-		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Failed to write metadata: %s"), *FilePath);
-		return false;
+		UE_LOG(LogTemp, Warning, TEXT("[CameraCaptureSubsystem] Camera pointer invalid for metadata writing: %s"), 
+			*Data.CameraID.ToString());
 	}
 }
+
 
 // ============================================================================
 // Helper Functions
