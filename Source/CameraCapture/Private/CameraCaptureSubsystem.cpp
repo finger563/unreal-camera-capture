@@ -106,6 +106,12 @@ void UCameraCaptureSubsystem::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
+	// Process any pending deferred captures
+	if (CamerasAwaitingRGB.Num() > 0 || CamerasAwaitingDMV.Num() > 0)
+	{
+		ProcessDeferredCaptures();
+	}
+
 	// Safety check - only tick if initialized and capturing
 	if (!IsInitialized() || !bIsCapturing)
 	{
@@ -128,8 +134,8 @@ TStatId UCameraCaptureSubsystem::GetStatId() const
 
 bool UCameraCaptureSubsystem::IsTickable() const
 {
-	// Only tick if we're initialized and actively capturing
-	return IsInitialized() && bIsCapturing && !IsTemplate();
+	// Tick if we have pending captures or are actively capturing
+	return IsInitialized() && (bIsCapturing || PendingCaptureData.Num() > 0) && !IsTemplate();
 }
 
 void UCameraCaptureSubsystem::OnWorldBeginPlay(UWorld& InWorld)
@@ -429,6 +435,12 @@ void UCameraCaptureSubsystem::SetDmvMaterial(UMaterial* Material)
 	}
 }
 
+void UCameraCaptureSubsystem::SetSerializationEnabled(bool bEnabled)
+{
+	bSerializationEnabled = bEnabled;
+	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Serialization %s"), bEnabled ? TEXT("enabled") : TEXT("disabled"));
+}
+
 FCaptureStatistics UCameraCaptureSubsystem::GetStatistics() const
 {
 	FCaptureStatistics Stats;
@@ -447,12 +459,16 @@ void UCameraCaptureSubsystem::ExecuteSynchronizedCapture()
 {
 	double StartTime = FPlatformTime::Seconds();
 
-	int32 CapturedCount = 0;
-	int32 FailedCount = 0;
+	UE_LOG(LogTemp, Verbose, TEXT("[CameraCaptureSubsystem] ExecuteSynchronizedCapture: %d registered cameras"), RegisteredCameras.Num());
 
-	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] ExecuteSynchronizedCapture: %d registered cameras"), RegisteredCameras.Num());
+	// Clear any previous pending data
+	PendingCaptureData.Empty();
+	CamerasAwaitingRGB.Empty();
+	CamerasAwaitingDMV.Empty();
 
-	// Iterate all registered cameras
+	int32 InitiatedCount = 0;
+
+	// Iterate all registered cameras and initiate deferred captures
 	for (int32 i = RegisteredCameras.Num() - 1; i >= 0; --i)
 	{
 		TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D>& WeakCamera = RegisteredCameras[i];
@@ -467,47 +483,296 @@ void UCameraCaptureSubsystem::ExecuteSynchronizedCapture()
 
 		UIntrinsicSceneCaptureComponent2D* Camera = WeakCamera.Get();
 
-		// Capture data from this camera
-		FCaptureData CaptureData;
-		if (CaptureCameraData(Camera, CaptureData))
+		// Get camera identifier
+		FCameraIdentifier* CameraID = CameraIDMap.Find(Camera);
+		if (!CameraID)
 		{
-			// Serialize to disk
-			SerializeCaptureData(CaptureData);
-			CapturedCount++;
+			UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Camera not found in ID map: %s"), *Camera->GetName());
+			continue;
+		}
+
+		// Initiate deferred capture for this camera
+		InitiateDeferredCapture(Camera, *CameraID);
+		InitiatedCount++;
+	}
+
+	UE_LOG(LogTemp, Verbose, TEXT("[CameraCaptureSubsystem] Initiated deferred capture for %d cameras"), InitiatedCount);
+}
+
+void UCameraCaptureSubsystem::InitiateDeferredCapture(UIntrinsicSceneCaptureComponent2D* Camera, const FCameraIdentifier& CameraID)
+{
+	if (!Camera)
+	{
+		return;
+	}
+
+	UE_LOG(LogTemp, Verbose, TEXT("[CameraCaptureSubsystem] Initiating deferred capture for: %s"), *CameraID.ToString());
+
+	// Initialize capture data for this camera
+	FCaptureData& CaptureData = PendingCaptureData.FindOrAdd(Camera);
+	CaptureData.CameraID = CameraID;
+	CaptureData.FrameNumber = FrameIdCounter;
+	CaptureData.Timestamp = FPlatformTime::Seconds() - CaptureStartTime;
+	CaptureData.WorldTransform = Camera->GetComponentTransform();
+	CaptureData.Intrinsics = Camera->GetActiveIntrinsics();
+	CaptureData.bUsedCustomProjectionMatrix = Camera->bUseCustomProjectionMatrix;
+	if (CaptureData.bUsedCustomProjectionMatrix)
+	{
+		CaptureData.ProjectionMatrix = Camera->CustomProjectionMatrix;
+	}
+
+	// Get actor path and level name
+	if (AActor* Owner = Camera->GetOwner())
+	{
+		CaptureData.ActorPath = Owner->GetPathName();
+	}
+
+	UWorld* World = GetWorld();
+	if (World)
+	{
+		CaptureData.LevelName = World->GetMapName();
+	}
+
+	// Get dimensions
+	FCameraIntrinsics Intrinsics = Camera->GetActiveIntrinsics();
+	int32 Width = Intrinsics.ImageWidth;
+	int32 Height = Intrinsics.ImageHeight;
+	CaptureData.Width = Width;
+	CaptureData.Height = Height;
+
+	// Ensure camera has a render target for RGB
+	if (!Camera->TextureTarget)
+	{
+		UTextureRenderTarget2D* NewRenderTarget = NewObject<UTextureRenderTarget2D>(Camera);
+		NewRenderTarget->RenderTargetFormat = RTF_RGBA8;
+		NewRenderTarget->InitAutoFormat(Width, Height);
+		NewRenderTarget->UpdateResourceImmediate(true);
+
+		Camera->TextureTarget = NewRenderTarget;
+
+		UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Created dynamic RGB render target (%dx%d) for camera %s"),
+			Width, Height, *CameraID.ToString());
+	}
+
+	// Track what we're waiting for
+	bool bWaitingForRGB = false;
+	bool bWaitingForDMV = false;
+
+	// === Initiate RGB Capture ===
+	if (bCaptureRGB)
+	{
+		Camera->CaptureSceneDeferred();
+		CamerasAwaitingRGB.Add(Camera);
+		bWaitingForRGB = true;
+		UE_LOG(LogTemp, VeryVerbose, TEXT("[CameraCaptureSubsystem] Initiated deferred RGB capture for %s"), *CameraID.ToString());
+	}
+
+	// === Initiate Depth + Motion Vector Capture ===
+	if (bCaptureDepth || bCaptureMotionVectors)
+	{
+		TWeakObjectPtr<USceneCaptureComponent2D>* DmvCameraPtr = DmvCameras.Find(Camera);
+
+		if (DmvCameraPtr && DmvCameraPtr->IsValid())
+		{
+			USceneCaptureComponent2D* DmvCamera = DmvCameraPtr->Get();
+			DmvCamera->CaptureSceneDeferred();
+			CamerasAwaitingDMV.Add(Camera);
+			bWaitingForDMV = true;
+			UE_LOG(LogTemp, VeryVerbose, TEXT("[CameraCaptureSubsystem] Initiated deferred DMV capture for %s"), *CameraID.ToString());
 		}
 		else
 		{
-			FailedCount++;
+			// DMV camera not available, fill with zeros
+			CaptureData.DepthData.SetNumZeroed(Width * Height);
+			CaptureData.MotionVectorData.SetNumZeroed(Width * Height);
+			UE_LOG(LogTemp, VeryVerbose, TEXT("[CameraCaptureSubsystem] No DMV camera available for %s"), *CameraID.ToString());
 		}
 	}
 
-	TotalFramesCaptured += CapturedCount;
-	FrameIdCounter++;
-
-	// Update statistics
-	double EndTime = FPlatformTime::Seconds();
-	LastCaptureDurationMs = (EndTime - StartTime) * 1000.0f;
-
-	// Running average
-	if (AverageCaptureTimeMs == 0.0f)
+	// If not waiting for anything, process immediately
+	if (!bWaitingForRGB && !bWaitingForDMV)
 	{
-		AverageCaptureTimeMs = LastCaptureDurationMs;
-	}
-	else
-	{
-		AverageCaptureTimeMs = AverageCaptureTimeMs * 0.9f + LastCaptureDurationMs * 0.1f;
-	}
-
-	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Captured %d/%d cameras successfully, %d failed (%.2fms)"),
-		CapturedCount, RegisteredCameras.Num(), FailedCount, LastCaptureDurationMs);
-
-	if (CapturedCount > 0)
-	{
-		UE_LOG(LogTemp, Verbose, TEXT("[CameraCaptureSubsystem] Captured %d cameras in %.2fms (avg: %.2fms)"),
-			CapturedCount, LastCaptureDurationMs, AverageCaptureTimeMs);
+		ProcessCompletedCapture(Camera, CameraID);
 	}
 }
 
+void UCameraCaptureSubsystem::ProcessDeferredCaptures()
+{
+	static double LastProcessTime = 0.0;
+	double StartTime = FPlatformTime::Seconds();
+
+	// Process RGB captures
+	TArray<TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D>> CompletedRGB;
+	for (TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D> WeakCamera : CamerasAwaitingRGB)
+	{
+		if (!WeakCamera.IsValid())
+		{
+			CompletedRGB.Add(WeakCamera);
+			continue;
+		}
+
+		UIntrinsicSceneCaptureComponent2D* Camera = WeakCamera.Get();
+		UTextureRenderTarget2D* RenderTarget = Camera->TextureTarget;
+
+		if (!RenderTarget)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[CameraCaptureSubsystem] No render target for RGB capture"));
+			CompletedRGB.Add(WeakCamera);
+			continue;
+		}
+
+		FTextureRenderTargetResource* RTResource = RenderTarget->GameThread_GetRenderTargetResource();
+		if (RTResource)
+		{
+			FCaptureData* CaptureData = PendingCaptureData.Find(Camera);
+			if (CaptureData)
+			{
+				CaptureData->ImageData.SetNum(CaptureData->Width * CaptureData->Height);
+				if (RTResource->ReadPixels(CaptureData->ImageData))
+				{
+					UE_LOG(LogTemp, VeryVerbose, TEXT("[CameraCaptureSubsystem] RGB capture complete for %s"), *CaptureData->CameraID.ToString());
+					CompletedRGB.Add(WeakCamera);
+
+					// Check if we're also done with DMV
+					if (!CamerasAwaitingDMV.Contains(WeakCamera))
+					{
+						ProcessCompletedCapture(Camera, CaptureData->CameraID);
+					}
+				}
+			}
+		}
+	}
+
+	// Remove completed RGB captures
+	for (TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D> WeakCamera : CompletedRGB)
+	{
+		CamerasAwaitingRGB.Remove(WeakCamera);
+	}
+
+	// Process DMV captures
+	TArray<TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D>> CompletedDMV;
+	for (TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D> WeakCamera : CamerasAwaitingDMV)
+	{
+		if (!WeakCamera.IsValid())
+		{
+			CompletedDMV.Add(WeakCamera);
+			continue;
+		}
+
+		UIntrinsicSceneCaptureComponent2D* Camera = WeakCamera.Get();
+		TWeakObjectPtr<USceneCaptureComponent2D>* DmvCameraPtr = DmvCameras.Find(Camera);
+
+		if (!DmvCameraPtr || !DmvCameraPtr->IsValid())
+		{
+			CompletedDMV.Add(WeakCamera);
+			continue;
+		}
+
+		USceneCaptureComponent2D* DmvCamera = DmvCameraPtr->Get();
+		UTextureRenderTarget2D* DmvRT = DmvCamera->TextureTarget;
+
+		if (!DmvRT)
+		{
+			CompletedDMV.Add(WeakCamera);
+			continue;
+		}
+
+		FTextureRenderTargetResource* DmvResource = DmvRT->GameThread_GetRenderTargetResource();
+		if (DmvResource)
+		{
+			FCaptureData* CaptureData = PendingCaptureData.Find(Camera);
+			if (CaptureData)
+			{
+				TArray<FLinearColor> DmvPixels;
+				DmvPixels.SetNum(CaptureData->Width * CaptureData->Height);
+
+				if (DmvResource->ReadLinearColorPixels(DmvPixels))
+				{
+					CaptureData->DepthData.SetNum(CaptureData->Width * CaptureData->Height);
+					CaptureData->MotionVectorData.SetNum(CaptureData->Width * CaptureData->Height);
+
+					// Decode: R=Depth (cm), G=MotionX (px/frame), B=MotionY (px/frame)
+					for (int32 i = 0; i < DmvPixels.Num(); i++)
+					{
+						CaptureData->DepthData[i] = DmvPixels[i].R;
+						CaptureData->MotionVectorData[i] = FVector2D(DmvPixels[i].G, DmvPixels[i].B);
+					}
+
+					UE_LOG(LogTemp, VeryVerbose, TEXT("[CameraCaptureSubsystem] DMV capture complete for %s"), *CaptureData->CameraID.ToString());
+					CompletedDMV.Add(WeakCamera);
+
+					// Check if we're also done with RGB
+					if (!CamerasAwaitingRGB.Contains(WeakCamera))
+					{
+						ProcessCompletedCapture(Camera, CaptureData->CameraID);
+					}
+				}
+			}
+		}
+	}
+
+	// Remove completed DMV captures
+	for (TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D> WeakCamera : CompletedDMV)
+	{
+		CamerasAwaitingDMV.Remove(WeakCamera);
+	}
+
+	double EndTime = FPlatformTime::Seconds();
+	double ProcessTime = (EndTime - StartTime) * 1000.0;
+	if (ProcessTime > 1.0)
+	{
+		UE_LOG(LogTemp, VeryVerbose, TEXT("[CameraCaptureSubsystem] ProcessDeferredCaptures took %.2fms"), ProcessTime);
+	}
+}
+
+void UCameraCaptureSubsystem::ProcessCompletedCapture(UIntrinsicSceneCaptureComponent2D* Camera, const FCameraIdentifier& CameraID)
+{
+	FCaptureData* CaptureData = PendingCaptureData.Find(Camera);
+	if (!CaptureData)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[CameraCaptureSubsystem] No pending capture data for completed camera %s"), *CameraID.ToString());
+		return;
+	}
+
+	UE_LOG(LogTemp, Verbose, TEXT("[CameraCaptureSubsystem] Capture fully complete for %s"), *CameraID.ToString());
+
+	// Serialize to disk if enabled
+	if (bSerializationEnabled)
+	{
+		SerializeCaptureData(*CaptureData);
+	}
+
+	// Update statistics
+	TotalFramesCaptured++;
+
+	// Remove from pending
+	PendingCaptureData.Remove(Camera);
+
+	// Check if all cameras are done for this frame
+	if (PendingCaptureData.Num() == 0 && CamerasAwaitingRGB.Num() == 0 && CamerasAwaitingDMV.Num() == 0)
+	{
+		// Frame complete, increment counter
+		FrameIdCounter++;
+
+		double EndTime = FPlatformTime::Seconds();
+		LastCaptureDurationMs = (EndTime - CaptureStartTime) * 1000.0f;
+
+		// Running average
+		if (AverageCaptureTimeMs == 0.0f)
+		{
+			AverageCaptureTimeMs = LastCaptureDurationMs;
+		}
+		else
+		{
+			AverageCaptureTimeMs = AverageCaptureTimeMs * 0.9f + LastCaptureDurationMs * 0.1f;
+		}
+
+		UE_LOG(LogTemp, Verbose, TEXT("[CameraCaptureSubsystem] Frame %lld capture complete (%.2fms avg)"), 
+			FrameIdCounter - 1, AverageCaptureTimeMs);
+	}
+}
+
+// Legacy synchronous capture method - kept for backward compatibility but not used
 bool UCameraCaptureSubsystem::CaptureCameraData(UIntrinsicSceneCaptureComponent2D* Camera, FCaptureData& OutData)
 {
 	if (!Camera)

@@ -227,6 +227,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Camera Capture")
 	void SetDmvMaterial(UMaterial* Material);
 
+	/** Enable/disable automatic serialization of captured data */
+	UFUNCTION(BlueprintCallable, Category = "Camera Capture")
+	void SetSerializationEnabled(bool bEnabled);
+
+	/** Check if serialization is enabled */
+	UFUNCTION(BlueprintPure, Category = "Camera Capture")
+	bool IsSerializationEnabled() const { return bSerializationEnabled; }
+
 	// ============================================================================
 	// Statistics
 	// ============================================================================
@@ -238,6 +246,15 @@ public:
 protected:
 	/** Execute synchronized capture across all cameras */
 	void ExecuteSynchronizedCapture();
+
+	/** Process deferred captures that are ready */
+	void ProcessDeferredCaptures();
+
+	/** Initiate deferred capture for a single camera */
+	void InitiateDeferredCapture(UIntrinsicSceneCaptureComponent2D* Camera, const FCameraIdentifier& CameraID);
+
+	/** Process completed capture data */
+	void ProcessCompletedCapture(UIntrinsicSceneCaptureComponent2D* Camera, const FCameraIdentifier& CameraID);
 
 	/** Capture data from a single camera */
 	bool CaptureCameraData(UIntrinsicSceneCaptureComponent2D* Camera, FCaptureData& OutData);
@@ -296,6 +313,9 @@ private:
 	bool bCaptureDepth = true;
 	bool bCaptureMotionVectors = true;
 
+	/** Whether to automatically serialize captured data to disk */
+	bool bSerializationEnabled = true;
+
 	/** Last capture duration (for statistics) */
 	float LastCaptureDurationMs = 0.0f;
 
@@ -311,4 +331,13 @@ private:
 
 	/** Map of cameras to their depth+motion capture components */
 	TMap<TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D>, TWeakObjectPtr<USceneCaptureComponent2D>> DmvCameras;
+
+	/** Pending capture data being assembled asynchronously */
+	TMap<TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D>, FCaptureData> PendingCaptureData;
+
+	/** Cameras waiting for RGB capture completion */
+	TSet<TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D>> CamerasAwaitingRGB;
+
+	/** Cameras waiting for DMV capture completion */
+	TSet<TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D>> CamerasAwaitingDMV;
 };
