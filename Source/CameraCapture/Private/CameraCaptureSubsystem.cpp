@@ -549,16 +549,16 @@ void UCameraCaptureSubsystem::InitiateDeferredCapture(UIntrinsicSceneCaptureComp
 	CaptureData.Width = Width;
 	CaptureData.Height = Height;
 
-	// PERFORMANCE: Get pre-allocated buffers from pool and assign to CaptureData
-	// This reuses the same memory allocation across frames
+	// PERFORMANCE: Get pre-allocated buffers from pool and move into CaptureData
+	// This reuses the same memory allocation across frames without copying
 	FCameraBuffers& Buffers = BufferPool.FindOrAdd(Camera);
 	Buffers.EnsureSize(Width, Height);
 	Buffers.LastFrameUsed = FrameIdCounter;
 
-	// Assign pooled buffers to CaptureData (these are already allocated)
+	// Move pooled buffers to CaptureData (zero-copy transfer of ownership)
 	// ReadLinearColorPixels will write directly into these pre-allocated arrays
-	CaptureData.RgbData = Buffers.RgbBuffer;
-	CaptureData.DmvData = Buffers.DmvBuffer;
+	CaptureData.RgbData = MoveTemp(Buffers.RgbBuffer);
+	CaptureData.DmvData = MoveTemp(Buffers.DmvBuffer);
 
 	// Ensure camera has a render target for RGB
 	if (!Camera->TextureTarget)
@@ -715,24 +715,18 @@ void UCameraCaptureSubsystem::ProcessDeferredCaptures()
 			FCaptureData* CaptureData = PendingCaptureData.Find(Camera);
 			if (CaptureData)
 			{
-				// PERFORMANCE: Use pooled buffer instead of allocating
-				FCameraBuffers* Buffers = BufferPool.Find(Camera);
-				if (Buffers)
+				// PERFORMANCE: Read directly into pre-allocated buffer (no allocation or copy)
+				if (DmvResource->ReadLinearColorPixels(CaptureData->DmvData))
 				{
-					if (DmvResource->ReadLinearColorPixels(Buffers->DmvBuffer))
+					CaptureData->bDmvComplete = true;
+
+					UE_LOG(LogTemp, VeryVerbose, TEXT("[CameraCaptureSubsystem] DMV capture complete for %s"), *CaptureData->CameraID.ToString());
+					It.RemoveCurrent();
+
+					// PERFORMANCE: Direct completion check (no TSet lookup)
+					if (CaptureData->IsFullyComplete())
 					{
-						// Swap pooled buffer into capture data (zero-copy)
-						CaptureData->DmvData = Buffers->DmvBuffer;
-						CaptureData->bDmvComplete = true;
-
-						UE_LOG(LogTemp, VeryVerbose, TEXT("[CameraCaptureSubsystem] DMV capture complete for %s"), *CaptureData->CameraID.ToString());
-						It.RemoveCurrent();
-
-						// PERFORMANCE: Direct completion check (no TSet lookup)
-						if (CaptureData->IsFullyComplete())
-						{
-							ProcessCompletedCapture(Camera, CaptureData->CameraID);
-						}
+						ProcessCompletedCapture(Camera, CaptureData->CameraID);
 					}
 				}
 			}
@@ -761,10 +755,19 @@ void UCameraCaptureSubsystem::ProcessCompletedCapture(UIntrinsicSceneCaptureComp
 
 	UE_LOG(LogTemp, Verbose, TEXT("[CameraCaptureSubsystem] Capture fully complete for %s"), *CameraID.ToString());
 
-	// Serialize to disk if enabled
+	// Serialize to disk if enabled (do this BEFORE moving buffers back)
 	if (bSerializationEnabled)
 	{
 		SerializeCaptureData(*CaptureData);
+	}
+
+	// PERFORMANCE: Move buffers back to pool for next frame reuse (after serialization)
+	FCameraBuffers* Buffers = BufferPool.Find(Camera);
+	if (Buffers)
+	{
+		// Move capture data back to pool (zero-copy, just transfers ownership)
+		Buffers->RgbBuffer = MoveTemp(CaptureData->RgbData);
+		Buffers->DmvBuffer = MoveTemp(CaptureData->DmvData);
 	}
 
 	// Update statistics
