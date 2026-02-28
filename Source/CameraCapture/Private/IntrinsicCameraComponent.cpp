@@ -1,6 +1,8 @@
 #include "IntrinsicCameraComponent.h"
 #include "Utilities.h"
+#if WITH_EDITOR
 #include "DrawDebugHelpers.h"
+#endif
 #include "Engine/World.h"
 
 #if WITH_EDITOR
@@ -30,12 +32,14 @@ void UIntrinsicCameraComponent::BeginPlay()
 
 void UIntrinsicCameraComponent::BeginDestroy()
 {
+#if WITH_EDITOR
 	// Unregister delegate
 	if (OnObjectPropertyChangedHandle.IsValid())
 	{
 		FCoreUObjectDelegates::OnObjectPropertyChanged.Remove(OnObjectPropertyChangedHandle);
 		OnObjectPropertyChangedHandle.Reset();
 	}
+#endif
 
 	Super::BeginDestroy();
 }

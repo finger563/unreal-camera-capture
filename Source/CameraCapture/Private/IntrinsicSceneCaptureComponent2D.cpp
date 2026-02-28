@@ -42,12 +42,14 @@ void UIntrinsicSceneCaptureComponent2D::BeginPlay()
 
 void UIntrinsicSceneCaptureComponent2D::BeginDestroy()
 {
+#if WITH_EDITOR
 	// Unregister delegate
 	if (OnObjectPropertyChangedHandle.IsValid())
 	{
 		FCoreUObjectDelegates::OnObjectPropertyChanged.Remove(OnObjectPropertyChangedHandle);
 		OnObjectPropertyChangedHandle.Reset();
 	}
+#endif
 
 	Super::BeginDestroy();
 }
