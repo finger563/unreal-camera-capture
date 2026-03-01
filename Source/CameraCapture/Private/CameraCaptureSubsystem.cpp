@@ -194,14 +194,15 @@ void UCameraCaptureSubsystem::SetupDmvCamera(UIntrinsicSceneCaptureComponent2D* 
 	int32			  Width = Intrinsics.ImageWidth;
 	int32			  Height = Intrinsics.ImageHeight;
 
-	// Create new DMV camera component attached to the RGB camera
-	FString					  DmvName = RgbCamera->GetName() + TEXT("_dmv");
-	USceneCaptureComponent2D* DmvCamera = NewObject<USceneCaptureComponent2D>(
+	// Create DMV camera as UIntrinsicSceneCaptureComponent2D using RGB camera as template
+	// This preserves all intrinsics properties (custom projection matrix, focal length, etc.)
+	FString							   DmvName = RgbCamera->GetName() + TEXT("_dmv");
+	UIntrinsicSceneCaptureComponent2D* DmvCamera = NewObject<UIntrinsicSceneCaptureComponent2D>(
 		RgbCamera->GetOwner(),
-		USceneCaptureComponent2D::StaticClass(),
+		UIntrinsicSceneCaptureComponent2D::StaticClass(),
 		FName(*DmvName),
 		RF_Transient,
-		RgbCamera // Use RGB camera as template
+		RgbCamera // Use RGB camera as template — copies all intrinsics properties
 	);
 
 	if (!DmvCamera)
@@ -210,22 +211,28 @@ void UCameraCaptureSubsystem::SetupDmvCamera(UIntrinsicSceneCaptureComponent2D* 
 		return;
 	}
 
-	// Attach to RGB camera so it follows its transform
-	FAttachmentTransformRules AttachRules(EAttachmentRule::KeepRelative, true);
-	DmvCamera->AttachToComponent(RgbCamera, AttachRules);
-	DmvCamera->SetRelativeLocationAndRotation(FVector::ZeroVector, FRotator::ZeroRotator);
+	// Use SetupAttachment (pre-registration API) instead of AttachToComponent.
+	// This is critical when the RGB camera is the root component — AttachToComponent
+	// on an unregistered component won't properly establish the parent-child relationship.
+	DmvCamera->SetupAttachment(RgbCamera);
+	DmvCamera->SetRelativeLocation(FVector::ZeroVector);
+	DmvCamera->SetRelativeRotation(FRotator::ZeroRotator);
 
-	// Configure DMV camera (same as CaptureComponent.cpp ConfigureDmvCamera)
+	// Configure DMV camera capture settings
 	DmvCamera->bCaptureEveryFrame = false;
 	DmvCamera->bCaptureOnMovement = false;
 	DmvCamera->bAlwaysPersistRenderingState = true;
 	DmvCamera->CaptureSource = SCS_FinalColorLDR;
 
-	// Copy custom projection matrix if RGB camera uses one
-	if (RgbCamera->bUseCustomProjectionMatrix)
+	// Disable frustum visualization on the DMV copy (it would duplicate the RGB camera's)
+	DmvCamera->bDrawFrustumInGame = false;
+	DmvCamera->bDrawFrustumInEditor = false;
+
+	// Apply intrinsics on the copy to ensure custom projection matrix is set
+	if (DmvCamera->bUseCustomIntrinsics)
 	{
-		DmvCamera->bUseCustomProjectionMatrix = true;
-		DmvCamera->CustomProjectionMatrix = RgbCamera->CustomProjectionMatrix;
+		DmvCamera->ApplyIntrinsics();
+		UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Applied intrinsics to DMV camera '%s'"), *DmvName);
 	}
 
 	// Create dynamic material instance
@@ -252,12 +259,12 @@ void UCameraCaptureSubsystem::SetupDmvCamera(UIntrinsicSceneCaptureComponent2D* 
 	// Register component so it gets ticked and rendered
 	DmvCamera->RegisterComponent();
 
-	// Store references
+	// Store references (base class pointer is fine for the map)
 	DmvCameras.Add(RgbCamera, DmvCamera);
 	DmvRenderTargets.Add(RgbCamera, DmvRT);
 
-	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Created DMV camera '%s' with render target (%dx%d)"),
-		*DmvName, Width, Height);
+	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Created DMV camera '%s' with render target (%dx%d), intrinsics=%s"),
+		*DmvName, Width, Height, DmvCamera->bUseCustomIntrinsics ? TEXT("custom") : TEXT("default"));
 }
 
 void UCameraCaptureSubsystem::UnregisterCamera(UIntrinsicSceneCaptureComponent2D* Camera)
@@ -753,7 +760,7 @@ bool UCameraCaptureSubsystem::WriteEXRFile(const FString& FilePath, const FCaptu
 		float Depth = (bCaptureDepth && Data.DepthData.Num() == NumPixels) ? Data.DepthData[i] : 0.0f;
 		float MotionX = (bCaptureMotionVectors && Data.MotionVectorData.Num() == NumPixels) ? Data.MotionVectorData[i].X : 0.0f;
 		float MotionY = (bCaptureMotionVectors && Data.MotionVectorData.Num() == NumPixels) ? Data.MotionVectorData[i].Y : 0.0f;
-		
+
 		DmvData[i] = FLinearColor(Depth, MotionX, MotionY, 0.0f);
 	}
 
