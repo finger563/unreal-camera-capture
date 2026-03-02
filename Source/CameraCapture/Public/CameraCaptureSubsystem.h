@@ -3,6 +3,8 @@
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
 #include "CameraIntrinsics.h"
+#include "RHIGPUReadback.h"
+#include "Async/Async.h"
 #include "CameraCaptureSubsystem.generated.h"
 
 class UIntrinsicSceneCaptureComponent2D;
@@ -239,17 +241,26 @@ protected:
 	/** Execute synchronized capture across all cameras */
 	void ExecuteSynchronizedCapture();
 
-	/** Capture data from a single camera */
-	bool CaptureCameraData(UIntrinsicSceneCaptureComponent2D* Camera, FCaptureData& OutData);
+	/** Phase 1: Kick all scene captures and enqueue async GPU readbacks */
+	void KickAllCaptures();
+
+	/** Phase 2: Poll pending readbacks and harvest any that are ready */
+	void HarvestReadyReadbacks();
+
+	/** Enqueue an async GPU readback for a render target */
+	void EnqueueAsyncReadback(UTextureRenderTarget2D* RenderTarget, TUniquePtr<FRHIGPUTextureReadback>& OutReadback);
+
+	/** Build FCaptureData metadata (transform, intrinsics, etc.) without pixel data */
+	FCaptureData BuildCaptureMetadata(UIntrinsicSceneCaptureComponent2D* Camera);
 
 	/** Serialize capture data to disk */
 	void SerializeCaptureData(const FCaptureData& Data);
 
-	/** Write EXR file with 6 channels (RGB + Depth + Motion) */
-	bool WriteEXRFile(const FString& FilePath, const FCaptureData& Data);
+	/** Write EXR file with 6 channels (RGB + Depth + Motion) — called from background thread */
+	static bool WriteEXRFile_Static(const FString& FilePath, const FCaptureData& Data, bool bCaptureRGB, bool bCaptureDepth, bool bCaptureMotionVectors);
 
-	/** Write metadata JSON file */
-	bool WriteMetadataFile(const FString& FilePath, const FCaptureData& Data);
+	/** Write metadata JSON file — called from background thread */
+	static bool WriteMetadataFile_Static(const FString& FilePath, const FCaptureData& Data);
 
 	/** Generate unique camera ID, handling collisions */
 	FCameraIdentifier GenerateCameraID(UIntrinsicSceneCaptureComponent2D* Camera);
@@ -259,6 +270,45 @@ protected:
 
 	/** Set up depth+motion capture camera for a registered RGB camera */
 	void SetupDmvCamera(UIntrinsicSceneCaptureComponent2D* RgbCamera);
+
+	/** Ensure camera has a render target assigned */
+	void EnsureCameraRenderTarget(UIntrinsicSceneCaptureComponent2D* Camera);
+
+	// ============================================================================
+	// Async Readback State
+	// ============================================================================
+
+	/** Pending readback for a single camera's single channel (RGB or DMV) */
+	struct FPendingReadback
+	{
+		TUniquePtr<FRHIGPUTextureReadback> Readback;
+		int32							   Width = 0;
+		int32							   Height = 0;
+		bool							   bIsFloat = false; // true for RGBA32f (DMV), false for RGBA8 (RGB)
+	};
+
+	/** All pending state for a single camera in a single frame */
+	struct FPendingCameraCapture
+	{
+		FCaptureData	 Metadata; // Pre-built metadata (no pixel data yet)
+		FPendingReadback RgbReadback;
+		FPendingReadback DmvReadback;
+		bool			 bHasRgb = false;
+		bool			 bHasDmv = false;
+		int32			 FramesWaiting = 0; // Safety: drop after too many frames
+	};
+
+	/** Queue of pending captures awaiting GPU completion */
+	TArray<FPendingCameraCapture> PendingCaptures;
+
+	/** Maximum frames to wait for a readback before discarding */
+	static constexpr int32 MaxReadbackWaitFrames = 10;
+
+	/** Extract pixel data from a completed RGB readback into FCaptureData */
+	void HarvestRgbReadback(FPendingReadback& Readback, FCaptureData& OutData);
+
+	/** Extract pixel data from a completed DMV readback into FCaptureData */
+	void HarvestDmvReadback(FPendingReadback& Readback, FCaptureData& OutData);
 
 private:
 	/** Registered cameras (weak pointers to handle component destruction) */
