@@ -201,18 +201,28 @@ USceneCaptureComponent2D* UCaptureComponent::CopyAndAttachCamera(USceneCaptureCo
 {
 	auto name = camera->GetFName().ToString() + name_suffix;
 	UE_LOG(LogTemp, Log, TEXT("Copying camera '%s'"), *name);
-	auto copy = NewObject<USceneCaptureComponent2D>(this,
-		USceneCaptureComponent2D::StaticClass(),
+	// Use the source camera's actual class so subclass properties (e.g. intrinsics) are preserved
+	// Outer must be the owning actor for proper component hierarchy
+	auto copy = NewObject<USceneCaptureComponent2D>(GetOwner(),
+		camera->GetClass(),
 		FName(*name),
 		EObjectFlags::RF_NoFlags, // flags
-		camera					  // tmplate object for initializing
+		camera					  // template object for initializing
 	);
-	auto hitResult = FHitResult();
-	copy->K2_SetRelativeLocationAndRotation(FVector(0, 0, 0), FRotator(0, 0, 0), false, hitResult, true);
-	auto rule = EAttachmentRule::KeepRelative;
-	// rules: location, rotation, scale, weld bodies when attaching
-	auto attachmentRules = FAttachmentTransformRules(rule, rule, rule, true);
-	copy->AttachToComponent(camera, attachmentRules);
+
+	// Use SetupAttachment (pre-registration API) instead of AttachToComponent.
+	// This is critical when the source camera is the root component — AttachToComponent
+	// on an unregistered component won't properly establish the parent-child relationship.
+	copy->SetupAttachment(camera);
+	copy->SetRelativeLocation(FVector::ZeroVector);
+	copy->SetRelativeRotation(FRotator::ZeroRotator);
+	copy->RegisterComponent();
+
+	// Note: If the copy is UIntrinsicSceneCaptureComponent2D with bUseCustomIntrinsics,
+	// intrinsics are applied automatically via BeginPlay() (triggered by RegisterComponent).
+	// Do NOT call ApplyIntrinsics() manually here — the bMaintainYAxis path is not
+	// idempotent (it mutates FOVAngle), so a second call would corrupt the FOV.
+
 	return copy;
 }
 
@@ -332,7 +342,7 @@ void UCaptureComponent::InitOutput()
 	{
 		IFileManager::Get().MakeDirectory(*SaveLocation);
 	}
-	
+
 	// Create actor-based directory structure (matching CameraCaptureManager)
 	FString ActorName = GetOwner() ? GetOwner()->GetName() : TEXT("UnknownActor");
 	FString ActorPath = FPaths::Combine(*SaveLocation, *ActorName);
@@ -340,7 +350,7 @@ void UCaptureComponent::InitOutput()
 	{
 		IFileManager::Get().MakeDirectory(*ActorPath, true);
 	}
-	
+
 	// Legacy CSV files go in actor folder (not per-camera, since they contain all cameras on this actor)
 	ConfigFile = FPaths::Combine(*ActorPath, *FString("camera_config.csv"));
 	TransformFile = FPaths::Combine(*ActorPath, *FString("transformations.csv"));
@@ -525,7 +535,7 @@ void UCaptureComponent::SaveData()
 
 		// Get camera intrinsics
 		UIntrinsicSceneCaptureComponent2D* IntrinsicCamera = Cast<UIntrinsicSceneCaptureComponent2D>(rgb);
-		FCameraIntrinsics					Intrinsics;
+		FCameraIntrinsics				   Intrinsics;
 		if (IntrinsicCamera)
 		{
 			Intrinsics = IntrinsicCamera->GetActiveIntrinsics();
@@ -568,12 +578,11 @@ void UCaptureComponent::SaveData()
 		// Write metadata JSON
 		FString ActorPath = GetOwner() ? GetOwner()->GetPathName() : TEXT("");
 		FString LevelName = GetWorld() ? GetWorld()->GetName() : TEXT("");
-		float Timestamp = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
-		
+		float	Timestamp = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+
 		CameraCaptureUtils::WriteMetadataFile(metadata_filename, rgb, Intrinsics, ImageIndex, Timestamp, ActorPath, LevelName);
 	}
 
 	// now update the state variable for which image we're on
 	ImageIndex++;
 }
-
