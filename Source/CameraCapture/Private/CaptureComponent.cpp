@@ -218,15 +218,10 @@ USceneCaptureComponent2D* UCaptureComponent::CopyAndAttachCamera(USceneCaptureCo
 	copy->SetRelativeRotation(FRotator::ZeroRotator);
 	copy->RegisterComponent();
 
-	// If the source is an IntrinsicSceneCaptureComponent2D, apply intrinsics on the copy
-	if (UIntrinsicSceneCaptureComponent2D* IntrinsicCopy = Cast<UIntrinsicSceneCaptureComponent2D>(copy))
-	{
-		if (IntrinsicCopy->bUseCustomIntrinsics)
-		{
-			IntrinsicCopy->ApplyIntrinsics();
-			UE_LOG(LogTemp, Log, TEXT("  Applied intrinsics to copied camera '%s'"), *name);
-		}
-	}
+	// Note: If the copy is UIntrinsicSceneCaptureComponent2D with bUseCustomIntrinsics,
+	// intrinsics are applied automatically via BeginPlay() (triggered by RegisterComponent).
+	// Do NOT call ApplyIntrinsics() manually here — the bMaintainYAxis path is not
+	// idempotent (it mutates FOVAngle), so a second call would corrupt the FOV.
 
 	return copy;
 }

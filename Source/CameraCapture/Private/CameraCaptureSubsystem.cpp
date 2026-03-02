@@ -194,12 +194,12 @@ void UCameraCaptureSubsystem::SetupDmvCamera(UIntrinsicSceneCaptureComponent2D* 
 	int32			  Width = Intrinsics.ImageWidth;
 	int32			  Height = Intrinsics.ImageHeight;
 
-	// Create DMV camera as UIntrinsicSceneCaptureComponent2D using RGB camera as template
-	// This preserves all intrinsics properties (custom projection matrix, focal length, etc.)
+	// Create DMV camera using RGB camera's actual class so subclass-specific
+	// properties/overrides are preserved on the copy
 	FString							   DmvName = RgbCamera->GetName() + TEXT("_dmv");
 	UIntrinsicSceneCaptureComponent2D* DmvCamera = NewObject<UIntrinsicSceneCaptureComponent2D>(
 		RgbCamera->GetOwner(),
-		UIntrinsicSceneCaptureComponent2D::StaticClass(),
+		RgbCamera->GetClass(),
 		FName(*DmvName),
 		RF_Transient,
 		RgbCamera // Use RGB camera as template — copies all intrinsics properties
@@ -228,12 +228,9 @@ void UCameraCaptureSubsystem::SetupDmvCamera(UIntrinsicSceneCaptureComponent2D* 
 	DmvCamera->bDrawFrustumInGame = false;
 	DmvCamera->bDrawFrustumInEditor = false;
 
-	// Apply intrinsics on the copy to ensure custom projection matrix is set
-	if (DmvCamera->bUseCustomIntrinsics)
-	{
-		DmvCamera->ApplyIntrinsics();
-		UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Applied intrinsics to DMV camera '%s'"), *DmvName);
-	}
+	// Note: Do NOT call ApplyIntrinsics() manually here — it is called automatically
+	// via BeginPlay() (triggered by RegisterComponent below). The bMaintainYAxis path
+	// is not idempotent (it mutates FOVAngle), so a second call would corrupt the FOV.
 
 	// Create dynamic material instance
 	UMaterialInstanceDynamic* DmvMaterial = UMaterialInstanceDynamic::Create(DmvCaptureMaterialBase, this);
