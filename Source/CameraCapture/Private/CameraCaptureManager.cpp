@@ -40,23 +40,34 @@ void ACameraCaptureManager::BeginPlay()
 	CachedSubsystem->SetCaptureRate(CaptureEveryNFrames);
 	CachedSubsystem->SetCaptureChannels(bCaptureRGB, bCaptureDepth, bCaptureMotionVectors);
 
-	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureManager] Configuration complete, registering cameras..."));
-
-	// Register cameras
-	RegisterCameras();
-
-	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureManager] Cameras registered"));
+	// Auto-configure cameras if enabled
+	if (bAutoConfigureCamerasOnBeginPlay)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[CameraCaptureManager] Auto-configuring cameras..."));
+		RegisterCameras();
+		UE_LOG(LogTemp, Log, TEXT("[CameraCaptureManager] Cameras registered: %d"), GetRegisteredCameraCount());
+	}
+	else
+	{
+		UE_LOG(LogTemp, Log, TEXT("[CameraCaptureManager] Auto-configure cameras disabled"));
+	}
 
 	bInitialized = true;
 
-	// Auto-start if configured
-	if (bAutoStartOnBeginPlay)
+	// Auto-start capture if configured
+	if (bAutoStartCaptureOnBeginPlay)
 	{
 		UE_LOG(LogTemp, Log, TEXT("[CameraCaptureManager] Auto-starting capture..."));
+
+		// Set serialization state before starting capture
+		CachedSubsystem->SetSerializationEnabled(bAutoStartSerializationOnBeginPlay);
+		UE_LOG(LogTemp, Log, TEXT("[CameraCaptureManager] Serialization: %s"), 
+			bAutoStartSerializationOnBeginPlay ? TEXT("enabled") : TEXT("disabled"));
+
 		StartCapture();
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureManager] Initialized with %d cameras"), GetRegisteredCameraCount());
+	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureManager] Initialized successfully"));
 }
 
 void ACameraCaptureManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -108,6 +119,11 @@ void ACameraCaptureManager::PostEditChangeProperty(FPropertyChangedEvent& Proper
 			// Re-register cameras when mode or list changes
 			UnregisterAllCameras();
 			RegisterCameras();
+		}
+		else if (PropertyName == GET_MEMBER_NAME_CHECKED(ACameraCaptureManager, bAutoStartSerializationOnBeginPlay))
+		{
+			// Update serialization state in subsystem
+			CachedSubsystem->SetSerializationEnabled(bAutoStartSerializationOnBeginPlay);
 		}
 	}
 }
@@ -167,6 +183,22 @@ int64 ACameraCaptureManager::GetTotalFramesCaptured() const
 		return Stats.TotalFramesCaptured;
 	}
 	return 0;
+}
+
+void ACameraCaptureManager::SetSerializationEnabled(bool bEnabled)
+{
+	UCameraCaptureSubsystem* Subsystem = GetCaptureSubsystem();
+	if (Subsystem)
+	{
+		Subsystem->SetSerializationEnabled(bEnabled);
+		UE_LOG(LogTemp, Log, TEXT("[CameraCaptureManager] Serialization %s"), bEnabled ? TEXT("enabled") : TEXT("disabled"));
+	}
+}
+
+bool ACameraCaptureManager::IsSerializationEnabled() const
+{
+	UCameraCaptureSubsystem* Subsystem = GetCaptureSubsystem();
+	return Subsystem ? Subsystem->IsSerializationEnabled() : false;
 }
 
 // ============================================================================
