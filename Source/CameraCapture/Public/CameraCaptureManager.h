@@ -48,9 +48,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (ClampMin = "1", DisplayName = "Capture Every N Frames"))
 	int32 CaptureEveryNFrames = 1;
 
+	/** Automatically configure cameras on BeginPlay (registers cameras based on mode) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (DisplayName = "Auto Configure Cameras On Begin Play"))
+	bool bAutoConfigureCamerasOnBeginPlay = false;
+
 	/** Automatically start capture when play begins */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (DisplayName = "Auto Start On Begin Play"))
-	bool bAutoStartOnBeginPlay = false;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (DisplayName = "Auto Start Capture On Begin Play"))
+	bool bAutoStartCaptureOnBeginPlay = false;
+
+	/** Automatically start serialization when play begins (requires auto start capture) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (DisplayName = "Auto Start Capture On Begin Play", EditCondition = "bAutoStartCaptureOnBeginPlay"))
+	bool bAutoStartSerializationOnBeginPlay = false;
 
 	/** Capture RGB color data */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (DisplayName = "Capture RGB"))
@@ -103,6 +111,14 @@ public:
 	/** Get total frames captured this session */
 	UFUNCTION(BlueprintPure, Category = "Camera Capture", meta = (DisplayName = "Get Total Frames Captured"))
 	int64 GetTotalFramesCaptured() const;
+
+	/** Enable/disable serialization of captured data */
+	UFUNCTION(BlueprintCallable, Category = "Camera Capture", meta = (DisplayName = "Set Serialization Enabled"))
+	void SetSerializationEnabled(bool bEnabled);
+
+	/** Check if serialization is currently enabled */
+	UFUNCTION(BlueprintPure, Category = "Camera Capture", meta = (DisplayName = "Is Serialization Enabled"))
+	bool IsSerializationEnabled() const;
 
 protected:
 	// AActor interface

@@ -229,6 +229,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Camera Capture")
 	void SetDmvMaterial(UMaterial* Material);
 
+	/** Enable/disable automatic serialization of captured data */
+	UFUNCTION(BlueprintCallable, Category = "Camera Capture")
+	void SetSerializationEnabled(bool bEnabled);
+
+	/** Check if serialization is enabled */
+	UFUNCTION(BlueprintPure, Category = "Camera Capture")
+	bool IsSerializationEnabled() const { return bSerializationEnabled; }
+
 	// ============================================================================
 	// Statistics
 	// ============================================================================
@@ -345,6 +353,9 @@ private:
 	bool bCaptureRGB = true;
 	bool bCaptureDepth = true;
 	bool bCaptureMotionVectors = true;
+
+	/** Whether to automatically serialize captured data to disk */
+	bool bSerializationEnabled = true;
 
 	/** Last capture duration (for statistics) */
 	float LastCaptureDurationMs = 0.0f;

@@ -435,6 +435,12 @@ void UCameraCaptureSubsystem::SetDmvMaterial(UMaterial* Material)
 	}
 }
 
+void UCameraCaptureSubsystem::SetSerializationEnabled(bool bEnabled)
+{
+	bSerializationEnabled = bEnabled;
+	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Serialization %s"), bEnabled ? TEXT("enabled") : TEXT("disabled"));
+}
+
 FCaptureStatistics UCameraCaptureSubsystem::GetStatistics() const
 {
 	FCaptureStatistics Stats;
