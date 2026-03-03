@@ -50,14 +50,14 @@ public:
 
 	/** Automatically configure cameras on BeginPlay (registers cameras based on mode) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (DisplayName = "Auto Configure Cameras On Begin Play"))
-	bool bAutoConfigureCamerasOnBeginPlay = false;
+	bool bAutoConfigureCamerasOnBeginPlay = true;
 
 	/** Automatically start capture when play begins */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (DisplayName = "Auto Start Capture On Begin Play"))
 	bool bAutoStartCaptureOnBeginPlay = false;
 
 	/** Automatically start serialization when play begins (requires auto start capture) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (DisplayName = "Auto Start Capture On Begin Play", EditCondition = "bAutoStartCaptureOnBeginPlay"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (DisplayName = "Auto Start Serialization On Begin Play", EditCondition = "bAutoStartCaptureOnBeginPlay"))
 	bool bAutoStartSerializationOnBeginPlay = false;
 
 	/** Capture RGB color data */

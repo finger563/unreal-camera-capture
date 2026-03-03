@@ -10,6 +10,7 @@
 #include "Misc/Paths.h"
 #include "Misc/FileHelper.h"
 #include "HAL/PlatformFileManager.h"
+#include "Async/Async.h"
 #include "ImageUtils.h"
 
 // ============================================================================
@@ -527,6 +528,15 @@ void UCameraCaptureSubsystem::KickAllCaptures()
 			}
 		}
 
+        // If neither RGB nor DMV was kicked, skip enqueueing this capture
+        // (should be rare since RGB is usually enabled, but just in case)
+        if (!Pending.bHasRgb && !Pending.bHasDmv)
+        {
+            continue;
+        }
+
+        // Only enqueue a pending capture if at least one channel was actually
+        // kicked
 		PendingCaptures.Add(MoveTemp(Pending));
 		KickedCount++;
 	}
@@ -615,8 +625,11 @@ void UCameraCaptureSubsystem::HarvestReadyReadbacks()
 				HarvestDmvReadback(Pending.DmvReadback, Data);
 			}
 
-			// Dispatch serialization to a background thread
-			SerializeCaptureData(MoveTemp(Data));
+            if (bSerializationEnabled) {
+              // Dispatch serialization to a background thread
+              SerializeCaptureData(MoveTemp(Data));
+            }
+
 			TotalFramesCaptured++;
 
 			PendingCaptures.RemoveAt(i);
@@ -788,7 +801,7 @@ void UCameraCaptureSubsystem::EnsureCameraRenderTarget(UIntrinsicSceneCaptureCom
 // Serialization (dispatched to background thread)
 // ============================================================================
 
-void UCameraCaptureSubsystem::SerializeCaptureData(const FCaptureData& Data)
+void UCameraCaptureSubsystem::SerializeCaptureData(FCaptureData&& Data)
 {
 	FString OutputDir = OutputDirectory;
 	bool	bRGB = bCaptureRGB;
@@ -833,7 +846,7 @@ bool UCameraCaptureSubsystem::WriteEXRFile_Static(const FString& FilePath, const
 
 	int32 NumPixels = Data.Width * Data.Height;
 
-	if (Data.ImageData.Num() == 0)
+	if (Data.ImageData.Num() == 0 && Data.DepthData.Num() == 0 && Data.MotionVectorData.Num() == 0)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[CameraCaptureSubsystem] No image data to write"));
 		return false;

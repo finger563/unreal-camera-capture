@@ -262,7 +262,7 @@ protected:
 	FCaptureData BuildCaptureMetadata(UIntrinsicSceneCaptureComponent2D* Camera);
 
 	/** Serialize capture data to disk */
-	void SerializeCaptureData(const FCaptureData& Data);
+	void SerializeCaptureData(FCaptureData&& Data);
 
 	/** Write EXR file with 6 channels (RGB + Depth + Motion) — called from background thread */
 	static bool WriteEXRFile_Static(const FString& FilePath, const FCaptureData& Data, bool bCaptureRGB, bool bCaptureDepth, bool bCaptureMotionVectors);
