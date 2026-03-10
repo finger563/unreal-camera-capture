@@ -10,6 +10,13 @@
 class UIntrinsicSceneCaptureComponent2D;
 
 /**
+ * Fired on the game thread after a frame has been harvested.
+ * The payload is wrapped in a TSharedRef so listeners may safely hold a copy
+ * beyond the scope of the broadcast (the underlying data is ref-counted).
+ */
+DECLARE_MULTICAST_DELEGATE_OneParam(FOnFrameCaptured, TSharedRef<const FCaptureData> /*Data*/);
+
+/**
  * Unique identifier for a camera component within the capture system
  */
 USTRUCT(BlueprintType)
@@ -245,6 +252,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Camera Capture")
 	FCaptureStatistics GetStatistics() const;
 
+	/** Delegate fired after a frame has been harvested (game thread). */
+	FOnFrameCaptured OnFrameCaptured;
+
 protected:
 	/** Execute synchronized capture across all cameras */
 	void ExecuteSynchronizedCapture();
@@ -261,8 +271,8 @@ protected:
 	/** Build FCaptureData metadata (transform, intrinsics, etc.) without pixel data */
 	FCaptureData BuildCaptureMetadata(UIntrinsicSceneCaptureComponent2D* Camera);
 
-	/** Serialize capture data to disk */
-	void SerializeCaptureData(FCaptureData&& Data);
+	/** Serialize capture data to disk (takes shared ownership, safe for async). */
+	void SerializeCaptureData(TSharedRef<const FCaptureData> Data);
 
 	/** Write EXR file with 6 channels (RGB + Depth + Motion) — called from background thread */
 	static bool WriteEXRFile_Static(const FString& FilePath, const FCaptureData& Data, bool bCaptureRGB, bool bCaptureDepth, bool bCaptureMotionVectors);
