@@ -625,13 +625,16 @@ void UCameraCaptureSubsystem::HarvestReadyReadbacks()
 				HarvestDmvReadback(Pending.DmvReadback, Data);
 			}
 
-			// Notify listeners (streaming, etc.)
-			OnFrameCaptured.Broadcast(Data);
+			// Wrap in shared ref so listeners can safely retain the data
+			TSharedRef<const FCaptureData> SharedData = MakeShared<FCaptureData>(MoveTemp(Data));
 
-            if (bSerializationEnabled) {
-              // Dispatch serialization to a background thread
-              SerializeCaptureData(MoveTemp(Data));
-            }
+			// Notify listeners (streaming, etc.)
+			OnFrameCaptured.Broadcast(SharedData);
+
+			if (bSerializationEnabled)
+			{
+				SerializeCaptureData(SharedData);
+			}
 
 			TotalFramesCaptured++;
 
@@ -804,37 +807,38 @@ void UCameraCaptureSubsystem::EnsureCameraRenderTarget(UIntrinsicSceneCaptureCom
 // Serialization (dispatched to background thread)
 // ============================================================================
 
-void UCameraCaptureSubsystem::SerializeCaptureData(FCaptureData&& Data)
+void UCameraCaptureSubsystem::SerializeCaptureData(TSharedRef<const FCaptureData> Data)
 {
 	FString OutputDir = OutputDirectory;
 	bool	bRGB = bCaptureRGB;
 	bool	bDepth = bCaptureDepth;
 	bool	bMotion = bCaptureMotionVectors;
 
+	// Lambda captures the shared ref — keeps data alive until async write completes
 	AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
-		[CapturedData = Data, OutputDir, bRGB, bDepth, bMotion]() {
+		[Data, OutputDir, bRGB, bDepth, bMotion]() {
 			FString AbsoluteOutputDir = OutputDir;
 			if (FPaths::IsRelative(AbsoluteOutputDir))
 			{
 				AbsoluteOutputDir = FPaths::Combine(*FPaths::ProjectDir(), *OutputDir);
 			}
 
-			FString CameraPath = CapturedData.CameraID.GetFullPath(AbsoluteOutputDir);
+			FString CameraPath = Data->CameraID.GetFullPath(AbsoluteOutputDir);
 
 			if (!IFileManager::Get().DirectoryExists(*CameraPath))
 			{
 				IFileManager::Get().MakeDirectory(*CameraPath, true);
 			}
 
-			FString FrameNumberStr = FString::Printf(TEXT("%07lld"), CapturedData.FrameNumber);
+			FString FrameNumberStr = FString::Printf(TEXT("%07lld"), Data->FrameNumber);
 
 			// Write EXR
 			FString ExrPath = FPaths::Combine(CameraPath, FString::Printf(TEXT("frame_%s.exr"), *FrameNumberStr));
-			WriteEXRFile_Static(ExrPath, CapturedData, bRGB, bDepth, bMotion);
+			WriteEXRFile_Static(ExrPath, *Data, bRGB, bDepth, bMotion);
 
 			// Write metadata JSON
 			FString MetadataPath = FPaths::Combine(CameraPath, FString::Printf(TEXT("frame_%s.json"), *FrameNumberStr));
-			WriteMetadataFile_Static(MetadataPath, CapturedData);
+			WriteMetadataFile_Static(MetadataPath, *Data);
 		});
 }
 
