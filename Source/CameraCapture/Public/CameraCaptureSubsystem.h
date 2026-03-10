@@ -9,6 +9,8 @@
 
 class UIntrinsicSceneCaptureComponent2D;
 
+DECLARE_MULTICAST_DELEGATE_OneParam(FOnFrameCaptured, const FCaptureData& /*Data*/);
+
 /**
  * Unique identifier for a camera component within the capture system
  */
@@ -244,6 +246,9 @@ public:
 	/** Get capture statistics */
 	UFUNCTION(BlueprintPure, Category = "Camera Capture")
 	FCaptureStatistics GetStatistics() const;
+
+	/** Delegate fired after a frame has been harvested (game thread). */
+	FOnFrameCaptured OnFrameCaptured;
 
 protected:
 	/** Execute synchronized capture across all cameras */

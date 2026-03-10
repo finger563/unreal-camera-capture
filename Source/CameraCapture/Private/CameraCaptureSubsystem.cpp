@@ -625,6 +625,9 @@ void UCameraCaptureSubsystem::HarvestReadyReadbacks()
 				HarvestDmvReadback(Pending.DmvReadback, Data);
 			}
 
+			// Notify listeners (streaming, etc.)
+			OnFrameCaptured.Broadcast(Data);
+
             if (bSerializationEnabled) {
               // Dispatch serialization to a background thread
               SerializeCaptureData(MoveTemp(Data));
