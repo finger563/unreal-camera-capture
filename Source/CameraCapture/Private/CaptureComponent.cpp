@@ -104,13 +104,25 @@ void UCaptureComponent::ConfigureCameras()
 		UIntrinsicSceneCaptureComponent2D* IntrinsicCamera = Cast<UIntrinsicSceneCaptureComponent2D>(rgb);
 		int32							   ImageWidth = 640;
 		int32							   ImageHeight = 480;
+		int32							   DepthWidth = 640;
+		int32							   DepthHeight = 480;
 
 		if (IntrinsicCamera)
 		{
 			FCameraIntrinsics Intrinsics = IntrinsicCamera->GetActiveIntrinsics();
 			ImageWidth = Intrinsics.ImageWidth;
 			ImageHeight = Intrinsics.ImageHeight;
-			UE_LOG(LogTemp, Log, TEXT("  Using resolution %dx%d from camera intrinsics"), ImageWidth, ImageHeight);
+			UE_LOG(LogTemp, Log, TEXT("  Using RGB resolution %dx%d from camera intrinsics"), ImageWidth, ImageHeight);
+
+			// Use depth intrinsics for DMV camera if available
+			FCameraIntrinsics DepthIntrinsics = IntrinsicCamera->GetActiveDepthIntrinsics();
+			DepthWidth = DepthIntrinsics.ImageWidth;
+			DepthHeight = DepthIntrinsics.ImageHeight;
+
+			if (IntrinsicCamera->HasSeparateDepthIntrinsics())
+			{
+				UE_LOG(LogTemp, Log, TEXT("  Using separate depth resolution %dx%d"), DepthWidth, DepthHeight);
+			}
 		}
 		else
 		{
@@ -126,10 +138,35 @@ void UCaptureComponent::ConfigureCameras()
 
 		// make the dmv camera based on the rgb camera
 		auto dmv = CopyAndAttachCamera(rgb, FString("_depth_motion"));
+
+		// If the source camera has separate depth intrinsics, apply them to the DMV copy.
+		// CopyAndAttachCamera already called RegisterComponent (which triggered BeginPlay/ApplyIntrinsics
+		// with the RGB intrinsics), so we override and re-apply with the depth intrinsics.
+		if (IntrinsicCamera && IntrinsicCamera->HasSeparateDepthIntrinsics())
+		{
+			UIntrinsicSceneCaptureComponent2D* DmvIntrinsicCamera = Cast<UIntrinsicSceneCaptureComponent2D>(dmv);
+			if (DmvIntrinsicCamera)
+			{
+				DmvIntrinsicCamera->bUseDepthIntrinsics = false;
+				DmvIntrinsicCamera->bUseIntrinsicsAsset = IntrinsicCamera->bUseDepthIntrinsicsAsset;
+				DmvIntrinsicCamera->IntrinsicsAsset = IntrinsicCamera->DepthIntrinsicsAsset;
+				DmvIntrinsicCamera->InlineIntrinsics = IntrinsicCamera->DepthInlineIntrinsics;
+				DmvIntrinsicCamera->ApplyIntrinsics();
+			}
+		}
+
+		// Apply depth sensor offset if configured
+		if (IntrinsicCamera && IntrinsicCamera->bUseDepthSensorOffset)
+		{
+			dmv->SetRelativeLocation(IntrinsicCamera->DepthSensorOffset.GetLocation());
+			dmv->SetRelativeRotation(IntrinsicCamera->DepthSensorOffset.GetRotation().Rotator());
+			dmv->SetRelativeScale3D(IntrinsicCamera->DepthSensorOffset.GetScale3D());
+		}
+
 		ConfigureDmvCamera(dmv);
 		DmvCameras.Add(dmv);
-		// make the dmv texture
-		auto dmv_rt = MakeRenderTexture(ImageWidth, ImageHeight);
+		// make the dmv texture using depth intrinsics dimensions
+		auto dmv_rt = MakeRenderTexture(DepthWidth, DepthHeight);
 		DmvTextures.Add(dmv_rt);
 		dmv->TextureTarget = dmv_rt;
 	}

@@ -33,9 +33,60 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera Intrinsics", meta = (EditCondition = "bUseCustomIntrinsics && !bUseIntrinsicsAsset"))
 	FCameraIntrinsics InlineIntrinsics;
 
+	// ============================================================================
+	// Depth Intrinsics (optional, for cameras with different depth/color calibration)
+	// ============================================================================
+
+	/** Whether to use separate intrinsics for the depth capture camera.
+	 *  When false, the depth camera uses the same intrinsics as the RGB camera. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera Intrinsics|Depth",
+		meta = (EditCondition = "bUseCustomIntrinsics", DisplayName = "Use Separate Depth Intrinsics"))
+	bool bUseDepthIntrinsics = false;
+
+	/** Whether to use an asset or inline parameters for depth intrinsics */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera Intrinsics|Depth",
+		meta = (EditCondition = "bUseCustomIntrinsics && bUseDepthIntrinsics"))
+	bool bUseDepthIntrinsicsAsset = false;
+
+	/** Reference to reusable depth camera intrinsics asset */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera Intrinsics|Depth",
+		meta = (EditCondition = "bUseCustomIntrinsics && bUseDepthIntrinsics && bUseDepthIntrinsicsAsset"))
+	UCameraIntrinsicsAsset* DepthIntrinsicsAsset = nullptr;
+
+	/** Inline depth camera intrinsics parameters */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera Intrinsics|Depth",
+		meta = (EditCondition = "bUseCustomIntrinsics && bUseDepthIntrinsics && !bUseDepthIntrinsicsAsset"))
+	FCameraIntrinsics DepthInlineIntrinsics;
+
+	/** Whether the depth sensor has a physical offset from the RGB sensor.
+	 *  When enabled, the depth capture camera is positioned relative to this
+	 *  component using the transform below. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera Intrinsics|Depth",
+		meta = (EditCondition = "bUseCustomIntrinsics", DisplayName = "Use Depth Sensor Offset"))
+	bool bUseDepthSensorOffset = false;
+
+	/** Transform of the depth sensor relative to this (RGB) component.
+	 *  Applied as the depth capture camera's relative transform. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera Intrinsics|Depth",
+		meta = (EditCondition = "bUseCustomIntrinsics && bUseDepthSensorOffset", DisplayName = "Depth Sensor Offset"))
+	FTransform DepthSensorOffset = FTransform::Identity;
+
+	// ============================================================================
+	// Intrinsics API
+	// ============================================================================
+
 	/** Get the active intrinsics (from asset or inline) */
 	UFUNCTION(BlueprintCallable, Category = "Camera Intrinsics")
 	FCameraIntrinsics GetActiveIntrinsics() const;
+
+	/** Get the active depth intrinsics. Falls back to regular intrinsics if no
+	 *  separate depth intrinsics are configured. */
+	UFUNCTION(BlueprintCallable, Category = "Camera Intrinsics")
+	FCameraIntrinsics GetActiveDepthIntrinsics() const;
+
+	/** Whether this camera has separate depth intrinsics configured */
+	UFUNCTION(BlueprintPure, Category = "Camera Intrinsics")
+	bool HasSeparateDepthIntrinsics() const;
 
 	/** Apply the camera intrinsics to this scene capture component */
 	UFUNCTION(BlueprintCallable, Category = "Camera Intrinsics")

@@ -197,10 +197,11 @@ void UCameraCaptureSubsystem::SetupDmvCamera(UIntrinsicSceneCaptureComponent2D* 
 		return;
 	}
 
-	// Get intrinsics for render target creation
-	FCameraIntrinsics Intrinsics = RgbCamera->GetActiveIntrinsics();
-	int32			  Width = Intrinsics.ImageWidth;
-	int32			  Height = Intrinsics.ImageHeight;
+	// Determine intrinsics for the depth camera — use separate depth intrinsics if configured,
+	// otherwise fall back to the RGB camera's intrinsics
+	FCameraIntrinsics DepthIntrinsics = RgbCamera->GetActiveDepthIntrinsics();
+	int32			  Width = DepthIntrinsics.ImageWidth;
+	int32			  Height = DepthIntrinsics.ImageHeight;
 
 	// Create DMV camera using RGB camera's actual class so subclass-specific
 	// properties/overrides are preserved on the copy
@@ -210,7 +211,7 @@ void UCameraCaptureSubsystem::SetupDmvCamera(UIntrinsicSceneCaptureComponent2D* 
 		RgbCamera->GetClass(),
 		FName(*DmvName),
 		RF_Transient,
-		RgbCamera // Use RGB camera as template — copies all intrinsics properties
+		RgbCamera // Use RGB camera as template — copies all properties
 	);
 
 	if (!DmvCamera)
@@ -219,9 +220,42 @@ void UCameraCaptureSubsystem::SetupDmvCamera(UIntrinsicSceneCaptureComponent2D* 
 		return;
 	}
 
+	// If the RGB camera has separate depth intrinsics, override the DMV camera's
+	// regular intrinsics with them BEFORE RegisterComponent triggers BeginPlay/ApplyIntrinsics
+	if (RgbCamera->HasSeparateDepthIntrinsics())
+	{
+		DmvCamera->bUseDepthIntrinsics = false; // DMV camera doesn't need depth intrinsics itself
+		DmvCamera->bUseIntrinsicsAsset = RgbCamera->bUseDepthIntrinsicsAsset;
+		DmvCamera->IntrinsicsAsset = RgbCamera->DepthIntrinsicsAsset;
+		DmvCamera->InlineIntrinsics = RgbCamera->DepthInlineIntrinsics;
+
+		UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] DMV camera '%s' using separate depth intrinsics (%dx%d)"),
+			*DmvName, Width, Height);
+	}
+
 	DmvCamera->SetupAttachment(RgbCamera);
-	DmvCamera->SetRelativeLocation(FVector::ZeroVector);
-	DmvCamera->SetRelativeRotation(FRotator::ZeroRotator);
+
+	// Apply depth sensor offset if configured, otherwise zero out relative transform
+	if (RgbCamera->bUseDepthSensorOffset)
+	{
+		DmvCamera->SetRelativeLocation(RgbCamera->DepthSensorOffset.GetLocation());
+		DmvCamera->SetRelativeRotation(RgbCamera->DepthSensorOffset.GetRotation().Rotator());
+		DmvCamera->SetRelativeScale3D(RgbCamera->DepthSensorOffset.GetScale3D());
+
+		UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] DMV camera '%s' using depth sensor offset: Loc=(%.2f, %.2f, %.2f) Rot=(%.2f, %.2f, %.2f)"),
+			*DmvName,
+			RgbCamera->DepthSensorOffset.GetLocation().X,
+			RgbCamera->DepthSensorOffset.GetLocation().Y,
+			RgbCamera->DepthSensorOffset.GetLocation().Z,
+			RgbCamera->DepthSensorOffset.GetRotation().Rotator().Pitch,
+			RgbCamera->DepthSensorOffset.GetRotation().Rotator().Yaw,
+			RgbCamera->DepthSensorOffset.GetRotation().Rotator().Roll);
+	}
+	else
+	{
+		DmvCamera->SetRelativeLocation(FVector::ZeroVector);
+		DmvCamera->SetRelativeRotation(FRotator::ZeroRotator);
+	}
 
 	// Configure DMV camera capture settings
 	DmvCamera->bCaptureEveryFrame = false;
@@ -251,6 +285,7 @@ void UCameraCaptureSubsystem::SetupDmvCamera(UIntrinsicSceneCaptureComponent2D* 
 	}
 
 	// Create render target for DMV — RGBA32f for depth float precision
+	// Uses depth intrinsics dimensions (may differ from RGB if separate depth intrinsics are set)
 	UTextureRenderTarget2D* DmvRT = NewObject<UTextureRenderTarget2D>(this);
 	DmvRT->RenderTargetFormat = RTF_RGBA32f;
 	DmvRT->InitAutoFormat(Width, Height);
