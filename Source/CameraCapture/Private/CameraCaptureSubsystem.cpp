@@ -966,59 +966,11 @@ bool UCameraCaptureSubsystem::WriteMetadataFile_Static(const FString& FilePath, 
 	JsonObject->SetNumberField(TEXT("timestamp"), Data.Timestamp);
 	JsonObject->SetStringField(TEXT("camera_id"), Data.CameraID.ToString());
 
-	// World transform
-	TSharedPtr<FJsonObject> TransformJson = MakeShared<FJsonObject>();
-	FVector					Location = Data.WorldTransform.GetLocation();
-	FRotator				Rotation = Data.WorldTransform.Rotator();
-	FVector					Scale = Data.WorldTransform.GetScale3D();
-
-	TArray<TSharedPtr<FJsonValue>> LocationArray;
-	LocationArray.Add(MakeShared<FJsonValueNumber>(Location.X));
-	LocationArray.Add(MakeShared<FJsonValueNumber>(Location.Y));
-	LocationArray.Add(MakeShared<FJsonValueNumber>(Location.Z));
-	TransformJson->SetArrayField(TEXT("location"), LocationArray);
-
-	TArray<TSharedPtr<FJsonValue>> RotationArray;
-	RotationArray.Add(MakeShared<FJsonValueNumber>(Rotation.Pitch));
-	RotationArray.Add(MakeShared<FJsonValueNumber>(Rotation.Yaw));
-	RotationArray.Add(MakeShared<FJsonValueNumber>(Rotation.Roll));
-	TransformJson->SetArrayField(TEXT("rotation"), RotationArray);
-
-	TArray<TSharedPtr<FJsonValue>> ScaleArray;
-	ScaleArray.Add(MakeShared<FJsonValueNumber>(Scale.X));
-	ScaleArray.Add(MakeShared<FJsonValueNumber>(Scale.Y));
-	ScaleArray.Add(MakeShared<FJsonValueNumber>(Scale.Z));
-	TransformJson->SetArrayField(TEXT("scale"), ScaleArray);
-
-	JsonObject->SetObjectField(TEXT("world_transform"), TransformJson);
-
-	// Relative transform (camera relative to its owning actor's root)
-	{
-		TSharedPtr<FJsonObject> RelTransformJson = MakeShared<FJsonObject>();
-		FVector RelLocation = Data.RelativeTransform.GetLocation();
-		FRotator RelRotation = Data.RelativeTransform.Rotator();
-		FVector RelScale = Data.RelativeTransform.GetScale3D();
-
-		TArray<TSharedPtr<FJsonValue>> RelLocationArray;
-		RelLocationArray.Add(MakeShared<FJsonValueNumber>(RelLocation.X));
-		RelLocationArray.Add(MakeShared<FJsonValueNumber>(RelLocation.Y));
-		RelLocationArray.Add(MakeShared<FJsonValueNumber>(RelLocation.Z));
-		RelTransformJson->SetArrayField(TEXT("location"), RelLocationArray);
-
-		TArray<TSharedPtr<FJsonValue>> RelRotationArray;
-		RelRotationArray.Add(MakeShared<FJsonValueNumber>(RelRotation.Pitch));
-		RelRotationArray.Add(MakeShared<FJsonValueNumber>(RelRotation.Yaw));
-		RelRotationArray.Add(MakeShared<FJsonValueNumber>(RelRotation.Roll));
-		RelTransformJson->SetArrayField(TEXT("rotation"), RelRotationArray);
-
-		TArray<TSharedPtr<FJsonValue>> RelScaleArray;
-		RelScaleArray.Add(MakeShared<FJsonValueNumber>(RelScale.X));
-		RelScaleArray.Add(MakeShared<FJsonValueNumber>(RelScale.Y));
-		RelScaleArray.Add(MakeShared<FJsonValueNumber>(RelScale.Z));
-		RelTransformJson->SetArrayField(TEXT("scale"), RelScaleArray);
-
-		JsonObject->SetObjectField(TEXT("relative_transform"), RelTransformJson);
-	}
+	// Transforms
+	JsonObject->SetObjectField(TEXT("world_transform"),
+		CameraCaptureUtils::TransformToJsonObject(Data.WorldTransform));
+	JsonObject->SetObjectField(TEXT("relative_transform"),
+		CameraCaptureUtils::TransformToJsonObject(Data.RelativeTransform));
 
 	// Intrinsics
 	TSharedPtr<FJsonObject> IntrinsicsJson = MakeShared<FJsonObject>();

@@ -13,6 +13,43 @@
 namespace CameraCaptureUtils
 {
 
+TSharedPtr<FJsonObject> TransformToJsonObject(const FTransform& Transform)
+{
+	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+
+	FVector Location = Transform.GetLocation();
+	FRotator Rotation = Transform.Rotator();
+	FQuat Quaternion = Transform.GetRotation();
+	FVector Scale = Transform.GetScale3D();
+
+	TArray<TSharedPtr<FJsonValue>> LocationArray;
+	LocationArray.Add(MakeShared<FJsonValueNumber>(Location.X));
+	LocationArray.Add(MakeShared<FJsonValueNumber>(Location.Y));
+	LocationArray.Add(MakeShared<FJsonValueNumber>(Location.Z));
+	Obj->SetArrayField(TEXT("location"), LocationArray);
+
+	TArray<TSharedPtr<FJsonValue>> RotationArray;
+	RotationArray.Add(MakeShared<FJsonValueNumber>(Rotation.Pitch));
+	RotationArray.Add(MakeShared<FJsonValueNumber>(Rotation.Yaw));
+	RotationArray.Add(MakeShared<FJsonValueNumber>(Rotation.Roll));
+	Obj->SetArrayField(TEXT("rotation"), RotationArray);
+
+	TArray<TSharedPtr<FJsonValue>> QuaternionArray;
+	QuaternionArray.Add(MakeShared<FJsonValueNumber>(Quaternion.W));
+	QuaternionArray.Add(MakeShared<FJsonValueNumber>(Quaternion.X));
+	QuaternionArray.Add(MakeShared<FJsonValueNumber>(Quaternion.Y));
+	QuaternionArray.Add(MakeShared<FJsonValueNumber>(Quaternion.Z));
+	Obj->SetArrayField(TEXT("quaternion"), QuaternionArray);
+
+	TArray<TSharedPtr<FJsonValue>> ScaleArray;
+	ScaleArray.Add(MakeShared<FJsonValueNumber>(Scale.X));
+	ScaleArray.Add(MakeShared<FJsonValueNumber>(Scale.Y));
+	ScaleArray.Add(MakeShared<FJsonValueNumber>(Scale.Z));
+	Obj->SetArrayField(TEXT("scale"), ScaleArray);
+
+	return Obj;
+}
+
 bool WriteEXRFile(const FString&				FilePath,
 				  const TArray<FLinearColor>& RgbData,
 				  const TArray<FLinearColor>& DmvData,
@@ -105,39 +142,7 @@ bool WriteMetadataFile(const FString&				FilePath,
 
 	// World transform
 	FTransform CameraTransform = Camera->GetComponentTransform();
-	FVector Location = CameraTransform.GetLocation() / 100.0f; // Convert cm to meters
-	FRotator Rotation = CameraTransform.Rotator();
-	FQuat Quaternion = CameraTransform.GetRotation();
-	FVector Scale = CameraTransform.GetScale3D();
-
-	TSharedPtr<FJsonObject> TransformObject = MakeShareable(new FJsonObject);
-
-	TArray<TSharedPtr<FJsonValue>> LocationArray;
-	LocationArray.Add(MakeShareable(new FJsonValueNumber(Location.X)));
-	LocationArray.Add(MakeShareable(new FJsonValueNumber(Location.Y)));
-	LocationArray.Add(MakeShareable(new FJsonValueNumber(Location.Z)));
-	TransformObject->SetArrayField(TEXT("location"), LocationArray);
-
-	TArray<TSharedPtr<FJsonValue>> RotationArray;
-	RotationArray.Add(MakeShareable(new FJsonValueNumber(Rotation.Pitch)));
-	RotationArray.Add(MakeShareable(new FJsonValueNumber(Rotation.Yaw)));
-	RotationArray.Add(MakeShareable(new FJsonValueNumber(Rotation.Roll)));
-	TransformObject->SetArrayField(TEXT("rotation"), RotationArray);
-
-	TArray<TSharedPtr<FJsonValue>> QuaternionArray;
-	QuaternionArray.Add(MakeShareable(new FJsonValueNumber(Quaternion.W)));
-	QuaternionArray.Add(MakeShareable(new FJsonValueNumber(Quaternion.X)));
-	QuaternionArray.Add(MakeShareable(new FJsonValueNumber(Quaternion.Y)));
-	QuaternionArray.Add(MakeShareable(new FJsonValueNumber(Quaternion.Z)));
-	TransformObject->SetArrayField(TEXT("quaternion"), QuaternionArray);
-
-	TArray<TSharedPtr<FJsonValue>> ScaleArray;
-	ScaleArray.Add(MakeShareable(new FJsonValueNumber(Scale.X)));
-	ScaleArray.Add(MakeShareable(new FJsonValueNumber(Scale.Y)));
-	ScaleArray.Add(MakeShareable(new FJsonValueNumber(Scale.Z)));
-	TransformObject->SetArrayField(TEXT("scale"), ScaleArray);
-
-	RootObject->SetObjectField(TEXT("world_transform"), TransformObject);
+	RootObject->SetObjectField(TEXT("world_transform"), TransformToJsonObject(CameraTransform));
 
 	// Camera intrinsics
 	TSharedPtr<FJsonObject> IntrinsicsObject = MakeShareable(new FJsonObject);

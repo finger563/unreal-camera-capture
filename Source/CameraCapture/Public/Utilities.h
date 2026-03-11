@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "CameraIntrinsics.h"
+#include "Dom/JsonObject.h"
 
 // Forward declarations
 class USceneCaptureComponent2D;
@@ -28,6 +29,13 @@ static FORCEINLINE UMaterial* LoadMaterialFromPath(const FName& Path)
  */
 namespace CameraCaptureUtils
 {
+	/**
+	 * Convert an FTransform to a JSON object with location, rotation, quaternion, and scale.
+	 * Location is in Unreal units (cm), rotation in degrees [pitch, yaw, roll],
+	 * quaternion as [w, x, y, z], and scale as [x, y, z].
+	 */
+	TSharedPtr<FJsonObject> TransformToJsonObject(const FTransform& Transform);
+
 	/**
 	 * Write image data to EXR file using ImageWriteQueue
 	 * @param FilePath - Output file path
