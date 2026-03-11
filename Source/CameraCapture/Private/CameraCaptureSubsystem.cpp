@@ -791,6 +791,17 @@ FCaptureData UCameraCaptureSubsystem::BuildCaptureMetadata(UIntrinsicSceneCaptur
 	Data.FrameNumber = FrameIdCounter;
 	Data.Timestamp = FPlatformTime::Seconds() - CaptureStartTime;
 	Data.WorldTransform = Camera->GetComponentTransform();
+
+	// Compute transform relative to the owning actor's root (not just the immediate parent)
+	if (AActor* Owner = Camera->GetOwner())
+	{
+		Data.RelativeTransform = Data.WorldTransform.GetRelativeTransform(Owner->GetActorTransform());
+	}
+	else
+	{
+		Data.RelativeTransform = Camera->GetRelativeTransform();
+	}
+
 	Data.Intrinsics = Camera->GetActiveIntrinsics();
 	Data.bUsedCustomProjectionMatrix = Camera->bUseCustomProjectionMatrix;
 
@@ -980,6 +991,34 @@ bool UCameraCaptureSubsystem::WriteMetadataFile_Static(const FString& FilePath, 
 	TransformJson->SetArrayField(TEXT("scale"), ScaleArray);
 
 	JsonObject->SetObjectField(TEXT("world_transform"), TransformJson);
+
+	// Relative transform (camera relative to its owning actor's root)
+	{
+		TSharedPtr<FJsonObject> RelTransformJson = MakeShared<FJsonObject>();
+		FVector RelLocation = Data.RelativeTransform.GetLocation();
+		FRotator RelRotation = Data.RelativeTransform.Rotator();
+		FVector RelScale = Data.RelativeTransform.GetScale3D();
+
+		TArray<TSharedPtr<FJsonValue>> RelLocationArray;
+		RelLocationArray.Add(MakeShared<FJsonValueNumber>(RelLocation.X));
+		RelLocationArray.Add(MakeShared<FJsonValueNumber>(RelLocation.Y));
+		RelLocationArray.Add(MakeShared<FJsonValueNumber>(RelLocation.Z));
+		RelTransformJson->SetArrayField(TEXT("location"), RelLocationArray);
+
+		TArray<TSharedPtr<FJsonValue>> RelRotationArray;
+		RelRotationArray.Add(MakeShared<FJsonValueNumber>(RelRotation.Pitch));
+		RelRotationArray.Add(MakeShared<FJsonValueNumber>(RelRotation.Yaw));
+		RelRotationArray.Add(MakeShared<FJsonValueNumber>(RelRotation.Roll));
+		RelTransformJson->SetArrayField(TEXT("rotation"), RelRotationArray);
+
+		TArray<TSharedPtr<FJsonValue>> RelScaleArray;
+		RelScaleArray.Add(MakeShared<FJsonValueNumber>(RelScale.X));
+		RelScaleArray.Add(MakeShared<FJsonValueNumber>(RelScale.Y));
+		RelScaleArray.Add(MakeShared<FJsonValueNumber>(RelScale.Z));
+		RelTransformJson->SetArrayField(TEXT("scale"), RelScaleArray);
+
+		JsonObject->SetObjectField(TEXT("relative_transform"), RelTransformJson);
+	}
 
 	// Intrinsics
 	TSharedPtr<FJsonObject> IntrinsicsJson = MakeShared<FJsonObject>();
