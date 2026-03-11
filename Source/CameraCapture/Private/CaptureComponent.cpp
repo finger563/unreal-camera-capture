@@ -136,31 +136,34 @@ void UCaptureComponent::ConfigureCameras()
 		RgbTextures.Add(rgb_rt);
 		rgb->TextureTarget = rgb_rt;
 
-		// make the dmv camera based on the rgb camera
-		auto dmv = CopyAndAttachCamera(rgb, FString("_depth_motion"));
+		// make the dmv camera based on the rgb camera — defer registration so we can
+		// apply depth intrinsics/offset BEFORE BeginPlay runs ApplyIntrinsics
+		bool bNeedsDeferral = IntrinsicCamera && (IntrinsicCamera->HasSeparateDepthIntrinsics() || IntrinsicCamera->bUseDepthSensorOffset);
+		auto dmv = CopyAndAttachCamera(rgb, FString("_depth_motion"), bNeedsDeferral);
 
-		// If the source camera has separate depth intrinsics, apply them to the DMV copy.
-		// CopyAndAttachCamera already called RegisterComponent (which triggered BeginPlay/ApplyIntrinsics
-		// with the RGB intrinsics), so we override and re-apply with the depth intrinsics.
-		if (IntrinsicCamera && IntrinsicCamera->HasSeparateDepthIntrinsics())
+		if (bNeedsDeferral)
 		{
 			UIntrinsicSceneCaptureComponent2D* DmvIntrinsicCamera = Cast<UIntrinsicSceneCaptureComponent2D>(dmv);
-			if (DmvIntrinsicCamera)
+
+			// Override intrinsics before registration so BeginPlay applies the correct projection
+			if (DmvIntrinsicCamera && IntrinsicCamera->HasSeparateDepthIntrinsics())
 			{
 				DmvIntrinsicCamera->bUseDepthIntrinsics = false;
 				DmvIntrinsicCamera->bUseIntrinsicsAsset = IntrinsicCamera->bUseDepthIntrinsicsAsset;
 				DmvIntrinsicCamera->IntrinsicsAsset = IntrinsicCamera->DepthIntrinsicsAsset;
 				DmvIntrinsicCamera->InlineIntrinsics = IntrinsicCamera->DepthInlineIntrinsics;
-				DmvIntrinsicCamera->ApplyIntrinsics();
 			}
-		}
 
-		// Apply depth sensor offset if configured
-		if (IntrinsicCamera && IntrinsicCamera->bUseDepthSensorOffset)
-		{
-			dmv->SetRelativeLocation(IntrinsicCamera->DepthSensorOffset.GetLocation());
-			dmv->SetRelativeRotation(IntrinsicCamera->DepthSensorOffset.GetRotation().Rotator());
-			dmv->SetRelativeScale3D(IntrinsicCamera->DepthSensorOffset.GetScale3D());
+			// Apply depth sensor offset before registration
+			if (IntrinsicCamera->bUseDepthSensorOffset)
+			{
+				dmv->SetRelativeLocation(IntrinsicCamera->DepthSensorOffset.GetLocation());
+				dmv->SetRelativeRotation(IntrinsicCamera->DepthSensorOffset.GetRotation().Rotator());
+				dmv->SetRelativeScale3D(IntrinsicCamera->DepthSensorOffset.GetScale3D());
+			}
+
+			// Now register — BeginPlay/ApplyIntrinsics will use the correct depth intrinsics
+			dmv->RegisterComponent();
 		}
 
 		ConfigureDmvCamera(dmv);
@@ -234,7 +237,7 @@ void UCaptureComponent::ConfigureRgbCamera(USceneCaptureComponent2D* camera)
 	// They are applied in BeginPlay and when properties change in editor
 }
 
-USceneCaptureComponent2D* UCaptureComponent::CopyAndAttachCamera(USceneCaptureComponent2D* camera, FString name_suffix)
+USceneCaptureComponent2D* UCaptureComponent::CopyAndAttachCamera(USceneCaptureComponent2D* camera, FString name_suffix, bool bDeferRegistration)
 {
 	auto name = camera->GetFName().ToString() + name_suffix;
 	UE_LOG(LogTemp, Log, TEXT("Copying camera '%s'"), *name);
@@ -253,12 +256,14 @@ USceneCaptureComponent2D* UCaptureComponent::CopyAndAttachCamera(USceneCaptureCo
 	copy->SetupAttachment(camera);
 	copy->SetRelativeLocation(FVector::ZeroVector);
 	copy->SetRelativeRotation(FRotator::ZeroRotator);
-	copy->RegisterComponent();
 
-	// Note: If the copy is UIntrinsicSceneCaptureComponent2D with bUseCustomIntrinsics,
-	// intrinsics are applied automatically via BeginPlay() (triggered by RegisterComponent).
-	// Do NOT call ApplyIntrinsics() manually here — the bMaintainYAxis path is not
-	// idempotent (it mutates FOVAngle), so a second call would corrupt the FOV.
+	if (!bDeferRegistration)
+	{
+		copy->RegisterComponent();
+	}
+	// When bDeferRegistration is true, the caller is responsible for calling
+	// RegisterComponent() after applying any property overrides (e.g. depth intrinsics).
+	// This avoids BeginPlay/ApplyIntrinsics running with stale properties.
 
 	return copy;
 }

@@ -62,13 +62,13 @@ public:
 	 *  When enabled, the depth capture camera is positioned relative to this
 	 *  component using the transform below. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera Intrinsics|Depth",
-		meta = (EditCondition = "bUseCustomIntrinsics", DisplayName = "Use Depth Sensor Offset"))
+		meta = (DisplayName = "Use Depth Sensor Offset"))
 	bool bUseDepthSensorOffset = false;
 
 	/** Transform of the depth sensor relative to this (RGB) component.
 	 *  Applied as the depth capture camera's relative transform. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera Intrinsics|Depth",
-		meta = (EditCondition = "bUseCustomIntrinsics && bUseDepthSensorOffset", DisplayName = "Depth Sensor Offset"))
+		meta = (EditCondition = "bUseDepthSensorOffset", DisplayName = "Depth Sensor Offset"))
 	FTransform DepthSensorOffset = FTransform::Identity;
 
 	// ============================================================================
