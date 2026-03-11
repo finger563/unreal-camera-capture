@@ -116,7 +116,7 @@ protected:
 	void					  ConfigureCameras();
 	void					  ConfigureDmvCamera(USceneCaptureComponent2D* camera);
 	void					  ConfigureRgbCamera(USceneCaptureComponent2D* camera);
-	USceneCaptureComponent2D* CopyAndAttachCamera(USceneCaptureComponent2D* camera, FString name_suffix);
+	USceneCaptureComponent2D* CopyAndAttachCamera(USceneCaptureComponent2D* camera, FString name_suffix, bool bDeferRegistration = false);
 	UTextureRenderTarget2D*	  MakeRenderTexture(int width, int height);
 
 	// Serialization functions

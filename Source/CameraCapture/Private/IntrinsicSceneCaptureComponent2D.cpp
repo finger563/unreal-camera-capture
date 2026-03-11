@@ -83,10 +83,17 @@ void UIntrinsicSceneCaptureComponent2D::PostEditChangeProperty(FPropertyChangedE
 	{
 		FName MemberPropertyName = PropertyChangedEvent.MemberProperty->GetFName();
 
-		// Check if any intrinsics-related property changed
+		// Check if any intrinsics-related property changed (RGB or depth)
 		if (MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, bUseCustomIntrinsics) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, bUseIntrinsicsAsset) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, IntrinsicsAsset) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, InlineIntrinsics))
 		{
 			ApplyIntrinsics();
+		}
+
+		// Depth intrinsics changes don't affect this component's projection, but
+		// mark render state dirty so the editor refreshes the details panel
+		if (MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, bUseDepthIntrinsics) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, bUseDepthIntrinsicsAsset) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, DepthIntrinsicsAsset) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicSceneCaptureComponent2D, DepthInlineIntrinsics))
+		{
+			MarkRenderStateDirty();
 		}
 
 		// Force immediate redraw when frustum properties change
@@ -137,8 +144,12 @@ void UIntrinsicSceneCaptureComponent2D::OnObjectPropertyChanged(UObject* Object,
 	// Check if the changed object is our IntrinsicsAsset
 	if (Object == IntrinsicsAsset && IntrinsicsAsset != nullptr && bUseIntrinsicsAsset)
 	{
-		// An intrinsics property changed in our referenced asset
 		ApplyIntrinsics();
+	}
+	// Check if the changed object is our DepthIntrinsicsAsset
+	if (Object == DepthIntrinsicsAsset && DepthIntrinsicsAsset != nullptr && bUseDepthIntrinsics && bUseDepthIntrinsicsAsset)
+	{
+		MarkRenderStateDirty();
 	}
 }
 #endif
@@ -150,6 +161,25 @@ FCameraIntrinsics UIntrinsicSceneCaptureComponent2D::GetActiveIntrinsics() const
 		return IntrinsicsAsset->Intrinsics;
 	}
 	return InlineIntrinsics;
+}
+
+FCameraIntrinsics UIntrinsicSceneCaptureComponent2D::GetActiveDepthIntrinsics() const
+{
+	if (bUseDepthIntrinsics)
+	{
+		if (bUseDepthIntrinsicsAsset && DepthIntrinsicsAsset)
+		{
+			return DepthIntrinsicsAsset->Intrinsics;
+		}
+		return DepthInlineIntrinsics;
+	}
+	// Fall back to regular intrinsics
+	return GetActiveIntrinsics();
+}
+
+bool UIntrinsicSceneCaptureComponent2D::HasSeparateDepthIntrinsics() const
+{
+	return bUseCustomIntrinsics && bUseDepthIntrinsics;
 }
 
 void UIntrinsicSceneCaptureComponent2D::ApplyIntrinsics()
