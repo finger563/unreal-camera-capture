@@ -81,7 +81,7 @@ public:
 
 protected:
 	/** Whether we're currently using custom intrinsics for projection */
-	bool bUsingCustomIntrinsics = false;
+	bool		 bUsingCustomIntrinsics = false;
 	virtual void BeginPlay() override;
 	virtual void BeginDestroy() override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;

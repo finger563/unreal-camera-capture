@@ -563,15 +563,15 @@ void UCameraCaptureSubsystem::KickAllCaptures()
 			}
 		}
 
-        // If neither RGB nor DMV was kicked, skip enqueueing this capture
-        // (should be rare since RGB is usually enabled, but just in case)
-        if (!Pending.bHasRgb && !Pending.bHasDmv)
-        {
-            continue;
-        }
+		// If neither RGB nor DMV was kicked, skip enqueueing this capture
+		// (should be rare since RGB is usually enabled, but just in case)
+		if (!Pending.bHasRgb && !Pending.bHasDmv)
+		{
+			continue;
+		}
 
-        // Only enqueue a pending capture if at least one channel was actually
-        // kicked
+		// Only enqueue a pending capture if at least one channel was actually
+		// kicked
 		PendingCaptures.Add(MoveTemp(Pending));
 		KickedCount++;
 	}
