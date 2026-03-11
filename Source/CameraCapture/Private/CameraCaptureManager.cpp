@@ -61,7 +61,7 @@ void ACameraCaptureManager::BeginPlay()
 
 		// Set serialization state before starting capture
 		CachedSubsystem->SetSerializationEnabled(bAutoStartSerializationOnBeginPlay);
-		UE_LOG(LogTemp, Log, TEXT("[CameraCaptureManager] Serialization: %s"), 
+		UE_LOG(LogTemp, Log, TEXT("[CameraCaptureManager] Serialization: %s"),
 			bAutoStartSerializationOnBeginPlay ? TEXT("enabled") : TEXT("disabled"));
 
 		StartCapture();

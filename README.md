@@ -187,10 +187,16 @@ Each frame has an accompanying JSON file (`frame_NNNNNNN.json`) with complete ca
   "timestamp": 1.234,
   "camera_id": "RGBCamera",
   "world_transform": {
-    "location": [x, y, z],           // In meters (converted from UE cm)
+    "location": [x, y, z],           // In cm (Unreal units)
     "rotation": [pitch, yaw, roll],  // In degrees
     "quaternion": [w, x, y, z],      // Normalized quaternion
     "scale": [x, y, z]               // Component scale
+  },
+  "relative_transform": {
+    "location": [x, y, z],           // Relative to owning actor root, in cm
+    "rotation": [pitch, yaw, roll],  // In degrees
+    "quaternion": [w, x, y, z],      // Normalized quaternion
+    "scale": [x, y, z]               // Relative scale
   },
   "intrinsics": {
     "focal_length_x": 320.0,         // Pixels
@@ -205,6 +211,10 @@ Each frame has an accompanying JSON file (`frame_NNNNNNN.json`) with complete ca
   "level_name": "MyLevel"            // Level name
 }
 ```
+
+**Transform fields:**
+- **`world_transform`**: Camera's absolute position/orientation in the level (Unreal world space, cm).
+- **`relative_transform`**: Camera's position/orientation relative to its owning actor's root component. Useful for replaying captures on a differently-positioned actor — compose with the actor's current world transform to get the correct projection pose.
 
 ### Legacy CSV Files (CaptureComponent only)
 

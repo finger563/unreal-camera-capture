@@ -1,7 +1,7 @@
 #include "IntrinsicCameraComponent.h"
 #include "Utilities.h"
 #if WITH_EDITOR
-#include "DrawDebugHelpers.h"
+	#include "DrawDebugHelpers.h"
 #endif
 #include "Engine/World.h"
 
@@ -74,23 +74,13 @@ void UIntrinsicCameraComponent::PostEditChangeProperty(FPropertyChangedEvent& Pr
 		FName MemberPropertyName = PropertyChangedEvent.MemberProperty->GetFName();
 
 		// Check if any intrinsics-related property changed
-		if (MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicCameraComponent, bUseCustomIntrinsics) ||
-			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicCameraComponent, bUseIntrinsicsAsset) ||
-			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicCameraComponent, IntrinsicsAsset) ||
-			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicCameraComponent, InlineIntrinsics))
+		if (MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicCameraComponent, bUseCustomIntrinsics) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicCameraComponent, bUseIntrinsicsAsset) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicCameraComponent, IntrinsicsAsset) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicCameraComponent, InlineIntrinsics))
 		{
 			ApplyIntrinsics();
 		}
 
 		// Force immediate redraw when frustum properties change
-		if (MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicCameraComponent, bDrawFrustumInEditor) ||
-			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicCameraComponent, FrustumDrawDistance) ||
-			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicCameraComponent, FrustumNearDistance) ||
-			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicCameraComponent, FrustumColor) ||
-			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicCameraComponent, FrustumLineThickness) ||
-			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicCameraComponent, bDrawFrustumPlanes) ||
-			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicCameraComponent, FrustumPlaneColor) ||
-			MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicCameraComponent, FieldOfView))
+		if (MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicCameraComponent, bDrawFrustumInEditor) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicCameraComponent, FrustumDrawDistance) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicCameraComponent, FrustumNearDistance) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicCameraComponent, FrustumColor) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicCameraComponent, FrustumLineThickness) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicCameraComponent, bDrawFrustumPlanes) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicCameraComponent, FrustumPlaneColor) || MemberPropertyName == GET_MEMBER_NAME_CHECKED(UIntrinsicCameraComponent, FieldOfView))
 		{
 			MarkRenderStateDirty();
 		}
@@ -101,13 +91,7 @@ void UIntrinsicCameraComponent::PostEditChangeProperty(FPropertyChangedEvent& Pr
 		FName PropertyName = PropertyChangedEvent.Property->GetFName();
 
 		// Check if any intrinsics parameter changed
-		if (PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, FocalLengthX) ||
-			PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, FocalLengthY) ||
-			PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, PrincipalPointX) ||
-			PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, PrincipalPointY) ||
-			PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, ImageWidth) ||
-			PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, ImageHeight) ||
-			PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, bMaintainYAxis))
+		if (PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, FocalLengthX) || PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, FocalLengthY) || PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, PrincipalPointX) || PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, PrincipalPointY) || PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, ImageWidth) || PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, ImageHeight) || PropertyName == GET_MEMBER_NAME_CHECKED(FCameraIntrinsics, bMaintainYAxis))
 		{
 			ApplyIntrinsics();
 		}
@@ -258,22 +242,22 @@ void UIntrinsicCameraComponent::GetCameraView(float DeltaTime, FMinimalViewInfo&
 	if (bUsingCustomIntrinsics && bUseCustomIntrinsics)
 	{
 		FCameraIntrinsics Intrinsics = GetActiveIntrinsics();
-		
+
 		// Calculate offset from principal point
 		// Convert from pixel coordinates to normalized offset (-1 to 1)
 		float Width = static_cast<float>(Intrinsics.ImageWidth);
 		float Height = static_cast<float>(Intrinsics.ImageHeight);
-		
+
 		float cx = Intrinsics.PrincipalPointX;
 		float cy = Intrinsics.PrincipalPointY;
-		
+
 		// Calculate normalized offset from center
 		// OffCenterProjectionOffset is in proportion of screen dimensions
 		float OffsetX = (cx - Width * 0.5f) / Width;
 		float OffsetY = (cy - Height * 0.5f) / Height;
-		
+
 		DesiredView.OffCenterProjectionOffset = FVector2D(OffsetX, OffsetY);
-		
+
 		// Also adjust the FOV based on focal length
 		// FOV = 2 * atan(width / (2 * focal_length))
 		if (Intrinsics.FocalLengthX > 0.0f)
@@ -293,20 +277,20 @@ void UIntrinsicCameraComponent::DrawCameraFrustum()
 	}
 
 	FTransform CameraTransform = GetComponentTransform();
-	
+
 	// Ignore component scale for frustum drawing (so frustum is always world-scale)
 	CameraTransform.SetScale3D(FVector::OneVector);
 
 	// Get active intrinsics for frustum calculation
 	FCameraIntrinsics Intrinsics = bUseCustomIntrinsics ? GetActiveIntrinsics() : FCameraIntrinsics();
-	
+
 	// If not using custom intrinsics, derive from FOV
 	if (!bUseCustomIntrinsics)
 	{
 		// Assume 1920x1080 for default aspect ratio
 		Intrinsics.ImageWidth = 1920;
 		Intrinsics.ImageHeight = 1080;
-		
+
 		// Calculate focal length from horizontal FOV
 		float HalfHFOVRad = FMath::DegreesToRadians(FieldOfView * 0.5f);
 		Intrinsics.FocalLengthX = Intrinsics.ImageWidth / (2.0f * FMath::Tan(HalfHFOVRad));

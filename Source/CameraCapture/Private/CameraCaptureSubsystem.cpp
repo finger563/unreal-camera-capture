@@ -563,15 +563,15 @@ void UCameraCaptureSubsystem::KickAllCaptures()
 			}
 		}
 
-        // If neither RGB nor DMV was kicked, skip enqueueing this capture
-        // (should be rare since RGB is usually enabled, but just in case)
-        if (!Pending.bHasRgb && !Pending.bHasDmv)
-        {
-            continue;
-        }
+		// If neither RGB nor DMV was kicked, skip enqueueing this capture
+		// (should be rare since RGB is usually enabled, but just in case)
+		if (!Pending.bHasRgb && !Pending.bHasDmv)
+		{
+			continue;
+		}
 
-        // Only enqueue a pending capture if at least one channel was actually
-        // kicked
+		// Only enqueue a pending capture if at least one channel was actually
+		// kicked
 		PendingCaptures.Add(MoveTemp(Pending));
 		KickedCount++;
 	}
@@ -791,6 +791,17 @@ FCaptureData UCameraCaptureSubsystem::BuildCaptureMetadata(UIntrinsicSceneCaptur
 	Data.FrameNumber = FrameIdCounter;
 	Data.Timestamp = FPlatformTime::Seconds() - CaptureStartTime;
 	Data.WorldTransform = Camera->GetComponentTransform();
+
+	// Compute transform relative to the owning actor's root (not just the immediate parent)
+	if (AActor* Owner = Camera->GetOwner())
+	{
+		Data.RelativeTransform = Data.WorldTransform.GetRelativeTransform(Owner->GetActorTransform());
+	}
+	else
+	{
+		Data.RelativeTransform = Camera->GetRelativeTransform();
+	}
+
 	Data.Intrinsics = Camera->GetActiveIntrinsics();
 	Data.bUsedCustomProjectionMatrix = Camera->bUseCustomProjectionMatrix;
 
@@ -955,31 +966,11 @@ bool UCameraCaptureSubsystem::WriteMetadataFile_Static(const FString& FilePath, 
 	JsonObject->SetNumberField(TEXT("timestamp"), Data.Timestamp);
 	JsonObject->SetStringField(TEXT("camera_id"), Data.CameraID.ToString());
 
-	// World transform
-	TSharedPtr<FJsonObject> TransformJson = MakeShared<FJsonObject>();
-	FVector					Location = Data.WorldTransform.GetLocation();
-	FRotator				Rotation = Data.WorldTransform.Rotator();
-	FVector					Scale = Data.WorldTransform.GetScale3D();
-
-	TArray<TSharedPtr<FJsonValue>> LocationArray;
-	LocationArray.Add(MakeShared<FJsonValueNumber>(Location.X));
-	LocationArray.Add(MakeShared<FJsonValueNumber>(Location.Y));
-	LocationArray.Add(MakeShared<FJsonValueNumber>(Location.Z));
-	TransformJson->SetArrayField(TEXT("location"), LocationArray);
-
-	TArray<TSharedPtr<FJsonValue>> RotationArray;
-	RotationArray.Add(MakeShared<FJsonValueNumber>(Rotation.Pitch));
-	RotationArray.Add(MakeShared<FJsonValueNumber>(Rotation.Yaw));
-	RotationArray.Add(MakeShared<FJsonValueNumber>(Rotation.Roll));
-	TransformJson->SetArrayField(TEXT("rotation"), RotationArray);
-
-	TArray<TSharedPtr<FJsonValue>> ScaleArray;
-	ScaleArray.Add(MakeShared<FJsonValueNumber>(Scale.X));
-	ScaleArray.Add(MakeShared<FJsonValueNumber>(Scale.Y));
-	ScaleArray.Add(MakeShared<FJsonValueNumber>(Scale.Z));
-	TransformJson->SetArrayField(TEXT("scale"), ScaleArray);
-
-	JsonObject->SetObjectField(TEXT("world_transform"), TransformJson);
+	// Transforms
+	JsonObject->SetObjectField(TEXT("world_transform"),
+		CameraCaptureUtils::TransformToJsonObject(Data.WorldTransform));
+	JsonObject->SetObjectField(TEXT("relative_transform"),
+		CameraCaptureUtils::TransformToJsonObject(Data.RelativeTransform));
 
 	// Intrinsics
 	TSharedPtr<FJsonObject> IntrinsicsJson = MakeShared<FJsonObject>();

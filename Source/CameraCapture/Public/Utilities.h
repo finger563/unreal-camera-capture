@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "CameraIntrinsics.h"
+#include "Dom/JsonObject.h"
 
 // Forward declarations
 class USceneCaptureComponent2D;
@@ -29,6 +30,13 @@ static FORCEINLINE UMaterial* LoadMaterialFromPath(const FName& Path)
 namespace CameraCaptureUtils
 {
 	/**
+	 * Convert an FTransform to a JSON object with location, rotation, quaternion, and scale.
+	 * Location is in Unreal units (cm), rotation in degrees [pitch, yaw, roll],
+	 * quaternion as [w, x, y, z], and scale as [x, y, z].
+	 */
+	TSharedPtr<FJsonObject> TransformToJsonObject(const FTransform& Transform);
+
+	/**
 	 * Write image data to EXR file using ImageWriteQueue
 	 * @param FilePath - Output file path
 	 * @param RgbData - RGB image data
@@ -38,12 +46,12 @@ namespace CameraCaptureUtils
 	 * @param bIncludeDepth - If true, stores RGB+Depth (depth in alpha). If false, stores motion vectors (X in R, Y in G)
 	 * @return true if write task was successfully queued
 	 */
-	bool WriteEXRFile(const FString&				FilePath,
-					  const TArray<FLinearColor>& RgbData,
-					  const TArray<FLinearColor>& DmvData,
-					  int32							Width,
-					  int32							Height,
-					  bool							bIncludeDepth);
+	bool WriteEXRFile(const FString& FilePath,
+		const TArray<FLinearColor>&	 RgbData,
+		const TArray<FLinearColor>&	 DmvData,
+		int32						 Width,
+		int32						 Height,
+		bool						 bIncludeDepth);
 
 	/**
 	 * Write metadata JSON file with camera transform and intrinsics
@@ -56,13 +64,13 @@ namespace CameraCaptureUtils
 	 * @param LevelName - Level name (optional)
 	 * @return true if file was successfully written
 	 */
-	bool WriteMetadataFile(const FString&				FilePath,
-						   USceneCaptureComponent2D*	Camera,
-						   const FCameraIntrinsics&		Intrinsics,
-						   int32						FrameNumber,
-						   float						Timestamp,
-						   const FString&				ActorPath = TEXT(""),
-						   const FString&				LevelName = TEXT(""));
+	bool WriteMetadataFile(const FString& FilePath,
+		USceneCaptureComponent2D*		  Camera,
+		const FCameraIntrinsics&		  Intrinsics,
+		int32							  FrameNumber,
+		float							  Timestamp,
+		const FString&					  ActorPath = TEXT(""),
+		const FString&					  LevelName = TEXT(""));
 
 	/**
 	 * Draw a camera frustum for visualization using projection matrix
@@ -76,15 +84,15 @@ namespace CameraCaptureUtils
 	 * @param bDrawPlanes - Whether to draw filled frustum planes
 	 * @param PlaneColor - Color for frustum planes (with alpha)
 	 */
-	void DrawFrustumFromProjectionMatrix(UWorld*					World,
-										 const FTransform&			CameraTransform,
-										 const FMatrix&				ProjectionMatrix,
-										 float						NearDistance,
-										 float						FarDistance,
-										 const FColor&				LineColor,
-										 float						LineThickness,
-										 bool						bDrawPlanes,
-										 const FLinearColor&		PlaneColor);
+	void DrawFrustumFromProjectionMatrix(UWorld* World,
+		const FTransform&						 CameraTransform,
+		const FMatrix&							 ProjectionMatrix,
+		float									 NearDistance,
+		float									 FarDistance,
+		const FColor&							 LineColor,
+		float									 LineThickness,
+		bool									 bDrawPlanes,
+		const FLinearColor&						 PlaneColor);
 
 	/**
 	 * Draw a camera frustum for visualization using intrinsics
@@ -98,14 +106,13 @@ namespace CameraCaptureUtils
 	 * @param bDrawPlanes - Whether to draw filled frustum planes
 	 * @param PlaneColor - Color for frustum planes (with alpha)
 	 */
-	void DrawFrustumFromIntrinsics(UWorld*					World,
-								   const FTransform&		CameraTransform,
-								   const FCameraIntrinsics&	Intrinsics,
-								   float					NearDistance,
-								   float					FarDistance,
-								   const FColor&			LineColor,
-								   float					LineThickness,
-								   bool						bDrawPlanes,
-								   const FLinearColor&		PlaneColor);
-}
-
+	void DrawFrustumFromIntrinsics(UWorld* World,
+		const FTransform&				   CameraTransform,
+		const FCameraIntrinsics&		   Intrinsics,
+		float							   NearDistance,
+		float							   FarDistance,
+		const FColor&					   LineColor,
+		float							   LineThickness,
+		bool							   bDrawPlanes,
+		const FLinearColor&				   PlaneColor);
+} // namespace CameraCaptureUtils

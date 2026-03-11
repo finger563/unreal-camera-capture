@@ -90,6 +90,10 @@ struct CAMERACAPTURE_API FCaptureData
 	UPROPERTY(BlueprintReadOnly, Category = "Capture Data")
 	FTransform WorldTransform;
 
+	/** Transform relative to the owning actor's root */
+	UPROPERTY(BlueprintReadOnly, Category = "Capture Data")
+	FTransform RelativeTransform;
+
 	/** Camera intrinsics used for this capture */
 	UPROPERTY(BlueprintReadOnly, Category = "Capture Data")
 	FCameraIntrinsics Intrinsics;
