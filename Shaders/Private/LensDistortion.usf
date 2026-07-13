@@ -126,7 +126,35 @@
     }
 
     // ============================================================================
-    // Main Entry Point - Returns distorted UV in [0,1] space
+    // UV space handling
+    //
+    // The material's Custom node passes in GetDefaultSceneTextureUV(Parameters,
+    // PPI_PostProcessInput0) — a SCENE TEXTURE (buffer) UV. Scene capture views
+    // often occupy only a sub-rectangle of the pooled render buffer (the buffer is
+    // sized to the largest recent request, e.g. the main viewport), so buffer UV
+    // 0.5 is NOT the camera's optical center unless the capture happens to fill
+    // the whole buffer. All distortion math must therefore run in VIEWPORT UV
+    // space (0..1 across the actual view rect).
+    //
+    // The outputs feed SceneTexture nodes, whose UV pin expects VIEWPORT UV — the
+    // material translator wraps it in ViewportUVToSceneTextureUV itself (see
+    // FHLSLMaterialTranslator::SceneTextureLookup). So: convert in, compute,
+    // return viewport UV.
+    // ============================================================================
+    float2 CC_SceneUVToViewportUV(float2 SceneTextureUV)
+    {
+    #if POST_PROCESS_MATERIAL
+        // Inverse of ViewportUVToSceneTextureUV for PPI_PostProcessInput0.
+        return (SceneTextureUV - PostProcessInput_0_UVViewportMin) / PostProcessInput_0_UVViewportSize;
+    #else
+        return SceneTextureUV;
+    #endif
+    }
+
+    // ============================================================================
+    // Main Entry Point
+    // In:  scene-texture UV of PPI_PostProcessInput0 (what the Custom node passes)
+    // Out: distorted VIEWPORT UV in [0,1] (what SceneTexture node UV pins expect)
     // ============================================================================
     float2 CC_ApplyLensDistortion(
         float2 UV,
@@ -139,7 +167,9 @@
         float2 PrincipalPointOffset,
         float AspectRatio)
     {
-        float2 CenteredUV = (UV - 0.5) * 2.0 - PrincipalPointOffset * 2.0;
+        float2 ViewportUV = CC_SceneUVToViewportUV(UV);
+
+        float2 CenteredUV = (ViewportUV - 0.5) * 2.0 - PrincipalPointOffset * 2.0;
         CenteredUV.x *= AspectRatio;
 
         float2 DistortedUV = CC_DistortCenteredUV(CenteredUV, ProjectionMode,
@@ -149,12 +179,15 @@
         DistortedUV.x /= AspectRatio;
 
         float2 FinalUV = (DistortedUV + PrincipalPointOffset * 2.0) * 0.5 + 0.5;
-        return FinalUV;
+        // Clamp inside the view rect: outside it the pooled buffer contains
+        // garbage / other views, which shows up as edge smearing.
+        return clamp(FinalUV, 0.0, 1.0);
     }
 
     // ============================================================================
     // Per-channel entry point for chromatic aberration
     // ChannelSign: -1.0 for Red, 0.0 for Green, 1.0 for Blue
+    // In/out spaces: same as CC_ApplyLensDistortion.
     // ============================================================================
     float2 CC_ApplyLensDistortionChroma(
         float2 UV,
@@ -169,7 +202,9 @@
         float ChromaShift,
         float ChannelSign)
     {
-        float2 CenteredUV = (UV - 0.5) * 2.0 - PrincipalPointOffset * 2.0;
+        float2 ViewportUV = CC_SceneUVToViewportUV(UV);
+
+        float2 CenteredUV = (ViewportUV - 0.5) * 2.0 - PrincipalPointOffset * 2.0;
         CenteredUV.x *= AspectRatio;
 
         float2 ChromaUV = CenteredUV;
@@ -185,7 +220,9 @@
         DistortedUV.x /= AspectRatio;
 
         float2 FinalUV = (DistortedUV + PrincipalPointOffset * 2.0) * 0.5 + 0.5;
-        return FinalUV;
+        // Clamp inside the view rect: outside it the pooled buffer contains
+        // garbage / other views, which shows up as edge smearing.
+        return clamp(FinalUV, 0.0, 1.0);
     }
 
     #endif // LENS_DISTORTION_USF
