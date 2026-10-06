@@ -202,6 +202,27 @@ void UCameraCaptureSubsystem::RegisterCamera(UIntrinsicSceneCaptureComponent2D* 
 
 void UCameraCaptureSubsystem::SetupDmvCamera(UIntrinsicSceneCaptureComponent2D* RgbCamera)
 {
+	if (IsSingleCaptureMode())
+	{
+		// The whole point of this mode is that there is no second camera and so
+		// no second render. Depth comes out of the colour capture's alpha.
+		if (RgbCamera && RgbCamera->HasSeparateDepthIntrinsics())
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("[CameraCaptureSubsystem] %s has separate depth intrinsics, but single-capture mode takes both planes ")
+					TEXT("from one render target and so one resolution; the depth intrinsics are ignored. Use ")
+						TEXT("ColorPlusDepthMotion if the depth camera needs its own resolution."),
+				*RgbCamera->GetName());
+		}
+		if (bCaptureMotionVectors)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("[CameraCaptureSubsystem] Motion vectors were requested, but single-capture mode has no DMV pass to ")
+					TEXT("produce them; none will be written."));
+		}
+		return;
+	}
+
 	if (!RgbCamera || !DmvCaptureMaterialBase)
 	{
 		return;
@@ -544,6 +565,14 @@ void UCameraCaptureSubsystem::KickAllCaptures()
 			Pending.RgbReadback.Width = RgbRT->SizeX;
 			Pending.RgbReadback.Height = RgbRT->SizeY;
 			Pending.RgbReadback.PixelFormat = GetPixelFormatFromRenderTargetFormat(RgbRT->RenderTargetFormat);
+			// Single capture: this one readback carries both planes, so the
+			// harvest splits depth out of alpha and there is no DMV readback.
+			Pending.RgbReadback.bDepthInAlpha = IsSingleCaptureMode();
+			if (IsSingleCaptureMode())
+			{
+				Pending.Metadata.DepthWidth = RgbRT->SizeX;
+				Pending.Metadata.DepthHeight = RgbRT->SizeY;
+			}
 			Pending.Metadata.Width = RgbRT->SizeX;
 			Pending.Metadata.Height = RgbRT->SizeY;
 
@@ -552,7 +581,9 @@ void UCameraCaptureSubsystem::KickAllCaptures()
 		}
 
 		// --- Kick DMV capture + enqueue async readback ---
-		if (bCaptureDepth || bCaptureMotionVectors)
+		// Skipped entirely in single-capture mode: that is the render this mode
+		// exists to avoid.
+		if (!IsSingleCaptureMode() && (bCaptureDepth || bCaptureMotionVectors))
 		{
 			TWeakObjectPtr<USceneCaptureComponent2D>* DmvCameraPtr = DmvCameras.Find(Camera);
 			if (DmvCameraPtr && DmvCameraPtr->IsValid())
@@ -860,8 +891,21 @@ void UCameraCaptureSubsystem::HarvestRgbReadback(FPendingReadback& Readback, FCa
 		return;
 	}
 
-	OutData.ImageData.SetNumUninitialized(Width * Height);
+	const int32 NumPixels = Width * Height;
+	OutData.ImageData.SetNumUninitialized(NumPixels);
 	FColor* RESTRICT Dst = OutData.ImageData.GetData();
+
+	// Single-capture mode: alpha is scene depth in centimetres, straight from
+	// the engine's SCS_SceneColorSceneDepth pass, so this one readback fills
+	// both planes and no DMV render happened at all.
+	float* RESTRICT DepthDst = nullptr;
+	if (Readback.bDepthInAlpha)
+	{
+		OutData.DepthData.SetNumUninitialized(NumPixels);
+		OutData.DepthWidth = Width;
+		OutData.DepthHeight = Height;
+		DepthDst = OutData.DepthData.GetData();
+	}
 
 	switch (Format)
 	{
@@ -874,6 +918,14 @@ void UCameraCaptureSubsystem::HarvestRgbReadback(FPendingReadback& Readback, FCa
 				for (int32 x = 0; x < Width; x++)
 				{
 					Dst[x] = SrcRow[x].ToFColor(true);
+				}
+				if (DepthDst)
+				{
+					for (int32 x = 0; x < Width; x++)
+					{
+						DepthDst[x] = SrcRow[x].A;
+					}
+					DepthDst += Width;
 				}
 				Dst += Width;
 				SrcRow += RowPitchInPixels;
@@ -892,6 +944,14 @@ void UCameraCaptureSubsystem::HarvestRgbReadback(FPendingReadback& Readback, FCa
 				{
 					Dst[x] = FLinearColor(SrcRow[x]).ToFColor(true);
 				}
+				if (DepthDst)
+				{
+					for (int32 x = 0; x < Width; x++)
+					{
+						DepthDst[x] = SrcRow[x].A.GetFloat();
+					}
+					DepthDst += Width;
+				}
 				Dst += Width;
 				SrcRow += RowPitchInPixels;
 			}
@@ -899,7 +959,20 @@ void UCameraCaptureSubsystem::HarvestRgbReadback(FPendingReadback& Readback, FCa
 		}
 		default:
 		{
-			// BGRA8 / RGBA8: 4 bytes/pixel, already FColor-shaped.
+			// BGRA8 / RGBA8: 4 bytes/pixel, already FColor-shaped. An 8-bit
+			// target cannot carry a distance, so depth-in-alpha is impossible
+			// here -- EnsureCameraRenderTarget makes the target float in that
+			// mode, and a caller who supplied their own 8-bit one gets told.
+			if (DepthDst)
+			{
+				UE_LOG(LogTemp, Error,
+					TEXT("[CameraCaptureSubsystem] Single-capture mode needs a float render target; this one is 8-bit, ")
+						TEXT("so its alpha cannot hold depth in centimetres. No depth written."));
+				OutData.DepthData.Reset();
+				OutData.DepthWidth = 0;
+				OutData.DepthHeight = 0;
+				DepthDst = nullptr;
+			}
 			const FColor* SrcRow = static_cast<const FColor*>(SrcData);
 			if (Width == RowPitchInPixels)
 			{
@@ -1094,13 +1167,30 @@ void UCameraCaptureSubsystem::EnsureCameraRenderTarget(UIntrinsicSceneCaptureCom
 	}
 
 	UTextureRenderTarget2D* NewRenderTarget = NewObject<UTextureRenderTarget2D>(Camera);
-	NewRenderTarget->RenderTargetFormat = RTF_RGBA8; // RGB only needs 8-bit
+	if (IsSingleCaptureMode())
+	{
+		// Alpha has to hold a distance in centimetres, so the target cannot be
+		// 8-bit. Full float rather than half: at 100 m a half carries about 8 cm
+		// of error, which is not a depth measurement.
+		NewRenderTarget->RenderTargetFormat = RTF_RGBA32f;
+	}
+	else
+	{
+		NewRenderTarget->RenderTargetFormat = RTF_RGBA8; // RGB only needs 8-bit
+	}
 	NewRenderTarget->InitAutoFormat(Width, Height);
 	NewRenderTarget->UpdateResourceImmediate(true);
 
 	Camera->TextureTarget = NewRenderTarget;
 
-	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Created RGBA8 render target (%dx%d) for camera %s"),
+	if (IsSingleCaptureMode())
+	{
+		// The engine writes scene colour to RGB and scene depth to A in one pass.
+		Camera->CaptureSource = SCS_SceneColorSceneDepth;
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Created %s render target (%dx%d) for camera %s"),
+		IsSingleCaptureMode() ? TEXT("RGBA32f colour+depth") : TEXT("RGBA8"),
 		Width, Height, *Camera->GetName());
 }
 

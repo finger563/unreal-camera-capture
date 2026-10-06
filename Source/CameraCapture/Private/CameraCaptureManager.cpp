@@ -36,6 +36,10 @@ void ACameraCaptureManager::BeginPlay()
 	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureManager] Got subsystem, configuring..."));
 
 	// Configure subsystem
+	// Before anything else: the mode decides whether each camera gets a second
+	// camera and a float render target, so it has to be set before the cameras
+	// are configured.
+	CachedSubsystem->SetCaptureMode(CaptureMode);
 	CachedSubsystem->SetOutputDirectory(OutputDirectory);
 	CachedSubsystem->SetCaptureRate(CaptureEveryNFrames);
 	CachedSubsystem->SetCaptureChannels(bCaptureRGB, bCaptureDepth, bCaptureMotionVectors);

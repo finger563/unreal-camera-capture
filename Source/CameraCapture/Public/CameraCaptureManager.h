@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "CameraCaptureSubsystem.h" // ERammsCaptureMode (a UPROPERTY enum needs the definition)
 #include "CameraCaptureManager.generated.h"
 
 class UIntrinsicSceneCaptureComponent2D;
@@ -69,6 +70,12 @@ public:
 	bool bCaptureDepth = true;
 
 	/** Capture motion vector data (screen-space velocity) */
+	/** How many scene renders each camera costs. The single-capture mode roughly
+	 *  halves it, at the price of motion vectors and of depth sharing the colour
+	 *  resolution; see ERammsCaptureMode. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (DisplayName = "Capture Mode"))
+	ERammsCaptureMode CaptureMode = ERammsCaptureMode::ColorPlusDepthMotion;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (DisplayName = "Capture Motion Vectors"))
 	bool bCaptureMotionVectors = true;
 

@@ -171,6 +171,42 @@ enum class ERammsCaptureColorFormat : uint8
 };
 
 /**
+ * How many scene renders each camera costs.
+ *
+ * Measured at 640x480 colour + 320x240 depth, a camera costs 25-35 ms of frame
+ * time, and almost all of it is rendering: the default mode renders the scene
+ * TWICE per camera, once for colour and once through a post-process material
+ * that writes depth and motion vectors. Serialization, by comparison, is under
+ * a millisecond. So halving the renders is the one change that meaningfully
+ * moves multi-camera cost.
+ */
+UENUM(BlueprintType)
+enum class ERammsCaptureMode : uint8
+{
+	/**
+	 * Two renders per camera: colour, plus a DMV pass for depth and motion
+	 * vectors. Required for motion vectors, and the only mode where depth can
+	 * have its own resolution.
+	 */
+	ColorPlusDepthMotion UMETA(DisplayName = "Colour + depth/motion (2 renders)"),
+
+	/**
+	 * One render per camera, using SCS_SceneColorSceneDepth: HDR scene colour in
+	 * RGB and scene depth in alpha, straight from the engine.
+	 *
+	 * Roughly halves the per-camera cost. Three consequences worth knowing:
+	 * motion vectors are not produced at all; colour is linear scene colour
+	 * rather than the tone-mapped SCS_FinalColorHDR the other mode defaults to;
+	 * and because both planes come out of one render target they necessarily
+	 * share a resolution, so separate depth intrinsics are ignored.
+	 *
+	 * The depth is in centimetres, which is what FCaptureData has always
+	 * documented -- the DMV material emits a normalised 0..1 instead.
+	 */
+	SingleCaptureColorDepth UMETA(DisplayName = "Single capture, colour + depth in alpha (1 render)")
+};
+
+/**
  * Capture statistics for monitoring performance
  */
 USTRUCT(BlueprintType)
@@ -291,6 +327,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Camera Capture")
 	ERammsCaptureColorFormat GetColorFormat() const { return ColorFormat; }
 
+	/** How many renders each camera costs; see ERammsCaptureMode. Changing this
+	 *  while capturing takes effect on the next StartCapture. */
+	UFUNCTION(BlueprintCallable, Category = "Camera Capture")
+	void SetCaptureMode(ERammsCaptureMode Mode) { CaptureMode = Mode; }
+
+	UFUNCTION(BlueprintPure, Category = "Camera Capture")
+	ERammsCaptureMode GetCaptureMode() const { return CaptureMode; }
+
 	/** Check if serialization is enabled */
 	UFUNCTION(BlueprintPure, Category = "Camera Capture")
 	bool IsSerializationEnabled() const { return bSerializationEnabled; }
@@ -366,6 +410,10 @@ protected:
 		// FLinearColor (16), it walked twice the staging buffer and corrupted the
 		// heap. PF_Unknown means "do not interpret" rather than "assume 8-bit".
 		EPixelFormat PixelFormat = PF_Unknown;
+
+		/** Single-capture mode: alpha carries scene depth in cm, so the same
+		 *  readback supplies both planes and there is no second one. */
+		bool bDepthInAlpha = false;
 	};
 
 	/** All pending state for a single camera in a single frame */
@@ -460,6 +508,14 @@ private:
 
 	/** Colour output format; see ERammsCaptureColorFormat. */
 	ERammsCaptureColorFormat ColorFormat = ERammsCaptureColorFormat::CombinedEXR;
+
+	/** Renders per camera; see ERammsCaptureMode. Defaults to the two-render
+	 *  mode, which is the existing behaviour and the only one that can produce
+	 *  motion vectors. */
+	ERammsCaptureMode CaptureMode = ERammsCaptureMode::ColorPlusDepthMotion;
+
+	/** True when one render per camera supplies both planes. */
+	bool IsSingleCaptureMode() const { return CaptureMode == ERammsCaptureMode::SingleCaptureColorDepth; }
 
 	/** Last capture duration (for statistics) */
 	float LastCaptureDurationMs = 0.0f;
