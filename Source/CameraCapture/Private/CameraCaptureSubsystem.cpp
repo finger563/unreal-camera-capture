@@ -95,6 +95,12 @@ void UCameraCaptureSubsystem::Deinitialize()
 	// Drop any pending readbacks
 	PendingCaptures.Empty();
 
+	// Let anything already queued on the render thread finish first. The render
+	// commands hold their readbacks by shared pointer so they cannot dangle, but
+	// draining here means the staging buffers are actually released now rather
+	// than whenever the last command happens to retire.
+	FlushRenderingCommands();
+
 	// And the pooled ones, so their GPU staging buffers go with the subsystem
 	// rather than outliving it.
 	ReadbackPool.Empty();
@@ -640,19 +646,26 @@ namespace
 	}
 } // namespace
 
-TUniquePtr<FRHIGPUTextureReadback> UCameraCaptureSubsystem::AcquireReadback()
+TSharedPtr<FRHIGPUTextureReadback> UCameraCaptureSubsystem::AcquireReadback()
 {
 	if (ReadbackPool.Num() > 0)
 	{
 		return ReadbackPool.Pop(EAllowShrinking::No);
 	}
-	return MakeUnique<FRHIGPUTextureReadback>(TEXT("CamCaptureReadback"));
+	return MakeShared<FRHIGPUTextureReadback>(TEXT("CamCaptureReadback"));
 }
 
-void UCameraCaptureSubsystem::ReleaseReadback(TUniquePtr<FRHIGPUTextureReadback>&& Readback)
+void UCameraCaptureSubsystem::ReleaseReadback(TSharedPtr<FRHIGPUTextureReadback> Readback)
 {
 	if (!Readback)
 	{
+		return;
+	}
+	// Only the game thread touches the pool, and only once the render command
+	// that used this readback has finished with it.
+	if (!Readback.IsUnique())
+	{
+		// Something still holds it; dropping our reference is the safe move.
 		return;
 	}
 	// Past the cap the object is simply destroyed. Holding every readback a
@@ -661,13 +674,9 @@ void UCameraCaptureSubsystem::ReleaseReadback(TUniquePtr<FRHIGPUTextureReadback>
 	{
 		ReadbackPool.Add(MoveTemp(Readback));
 	}
-	else
-	{
-		Readback.Reset();
-	}
 }
 
-void UCameraCaptureSubsystem::EnqueueAsyncReadback(UTextureRenderTarget2D* RenderTarget, TUniquePtr<FRHIGPUTextureReadback>& OutReadback)
+void UCameraCaptureSubsystem::EnqueueAsyncReadback(UTextureRenderTarget2D* RenderTarget, TSharedPtr<FRHIGPUTextureReadback>& OutReadback)
 {
 	if (!RenderTarget)
 	{
@@ -686,16 +695,24 @@ void UCameraCaptureSubsystem::EnqueueAsyncReadback(UTextureRenderTarget2D* Rende
 	// camera. This used to allocate two per camera every capture frame.
 	OutReadback = AcquireReadback();
 
-	FRHIGPUTextureReadback*		  ReadbackPtr = OutReadback.Get();
-	FTextureRenderTargetResource* ResourcePtr = RTResource;
+	// Captured by SHARED pointer, not raw. A raw one let the game thread destroy
+	// the readback -- Deinitialize empties the pool, and PIE teardown does that
+	// while copies are still queued -- so the render command then dispatched
+	// through freed memory and landed on FRHIGPUMemoryReadback's unimplemented()
+	// base, asserting on the render thread after the subsystem was already gone.
+	TSharedPtr<FRHIGPUTextureReadback> Readback = OutReadback;
+	FTextureRenderTargetResource*	   ResourcePtr = RTResource;
 
 	ENQUEUE_RENDER_COMMAND(CameraCaptureEnqueueReadback)
 	(
-		[ReadbackPtr, ResourcePtr](FRHICommandListImmediate& RHICmdList) {
+		[Readback, ResourcePtr](FRHICommandListImmediate& RHICmdList) {
 			FRHITexture* Texture = ResourcePtr->GetRenderTargetTexture();
 			if (Texture)
 			{
-				ReadbackPtr->EnqueueCopy(RHICmdList, Texture);
+				// The five-argument virtual, as the engine itself calls it
+				// (Renderer/Private/SceneViewState.cpp), rather than the
+				// two-argument convenience overload.
+				Readback->EnqueueCopy(RHICmdList, Texture, FIntVector(0, 0, 0), 0, FIntVector(0, 0, 0));
 			}
 		});
 }
@@ -722,38 +739,72 @@ void UCameraCaptureSubsystem::HarvestReadyReadbacks()
 
 		if (bRgbReady && bDmvReady)
 		{
-			// Harvest pixel data from GPU staging buffers (fast memcpy, no stall)
-			FCaptureData& Data = Pending.Metadata;
-
+			// The copy out of the staging buffer has to happen on the RENDER
+			// thread: FRHIGPUTextureReadback::Lock goes through
+			// FRHICommandListImmediate::Get(), which checks IsInRenderingThread().
+			// Doing it here, in Tick, asserted and took the editor down on the
+			// very first harvested frame.
+			//
+			// Everything the render command touches is moved out of
+			// PendingCaptures first and held by shared pointer, because the array
+			// is about to be mutated and a reference into it would dangle.
+			TSharedRef<FCaptureData>	 DataRef = MakeShared<FCaptureData>(MoveTemp(Pending.Metadata));
+			TSharedPtr<FPendingReadback> RgbRb;
+			TSharedPtr<FPendingReadback> DmvRb;
 			if (Pending.bHasRgb && Pending.RgbReadback.Readback)
 			{
-				HarvestRgbReadback(Pending.RgbReadback, Data);
+				RgbRb = MakeShared<FPendingReadback>(MoveTemp(Pending.RgbReadback));
 			}
-
 			if (Pending.bHasDmv && Pending.DmvReadback.Readback)
 			{
-				HarvestDmvReadback(Pending.DmvReadback, Data);
+				DmvRb = MakeShared<FPendingReadback>(MoveTemp(Pending.DmvReadback));
 			}
-
-			// Readbacks are finished with at this point; hand them back before
-			// the pending entry is destroyed so the buffers get reused.
-			ReleaseReadback(MoveTemp(Pending.RgbReadback.Readback));
-			ReleaseReadback(MoveTemp(Pending.DmvReadback.Readback));
-
-			// Wrap in shared ref so listeners can safely retain the data
-			TSharedRef<const FCaptureData> SharedData = MakeShared<FCaptureData>(MoveTemp(Data));
-
-			// Notify listeners (streaming, etc.)
-			OnFrameCaptured.Broadcast(SharedData);
-
-			if (bSerializationEnabled)
-			{
-				SerializeCaptureData(SharedData);
-			}
-
-			TotalFramesCaptured++;
-
 			PendingCaptures.RemoveAt(i);
+
+			// Weak: the harvest outlives this tick, and the world (with this
+			// subsystem) can go away while a copy is still in flight.
+			TWeakObjectPtr<UCameraCaptureSubsystem> WeakThis(this);
+
+			ENQUEUE_RENDER_COMMAND(CameraCaptureHarvestReadbacks)
+			(
+				[WeakThis, DataRef, RgbRb, DmvRb](FRHICommandListImmediate& RHICmdList) {
+					if (RgbRb.IsValid())
+					{
+						HarvestRgbReadback(*RgbRb, *DataRef);
+					}
+					if (DmvRb.IsValid())
+					{
+						HarvestDmvReadback(*DmvRb, *DataRef);
+					}
+
+					// Back to the game thread to publish: listeners expect it,
+					// and the readback pool is not synchronised.
+					AsyncTask(ENamedThreads::GameThread, [WeakThis, DataRef, RgbRb, DmvRb]() {
+						UCameraCaptureSubsystem* Self = WeakThis.Get();
+						if (!Self)
+						{
+							return;
+						}
+
+						Self->OnFrameCaptured.Broadcast(DataRef);
+
+						if (Self->bSerializationEnabled)
+						{
+							Self->SerializeCaptureData(DataRef);
+						}
+
+						Self->TotalFramesCaptured++;
+
+						if (RgbRb.IsValid())
+						{
+							Self->ReleaseReadback(RgbRb->Readback);
+						}
+						if (DmvRb.IsValid())
+						{
+							Self->ReleaseReadback(DmvRb->Readback);
+						}
+					});
+				});
 		}
 		else if (Pending.FramesWaiting > MaxReadbackWaitFrames)
 		{
@@ -769,6 +820,7 @@ void UCameraCaptureSubsystem::HarvestReadyReadbacks()
 
 void UCameraCaptureSubsystem::HarvestRgbReadback(FPendingReadback& Readback, FCaptureData& OutData)
 {
+	check(IsInRenderingThread());
 	// A readback is raw GPU memory with no self-describing format, so refuse to
 	// interpret one we do not recognise rather than guessing a stride and walking
 	// off the end of the staging buffer.
@@ -871,6 +923,7 @@ void UCameraCaptureSubsystem::HarvestRgbReadback(FPendingReadback& Readback, FCa
 
 void UCameraCaptureSubsystem::HarvestDmvReadback(FPendingReadback& Readback, FCaptureData& OutData)
 {
+	check(IsInRenderingThread());
 	// Depth carries real distances, so a half-float target would quietly cap
 	// precision; but refusing outright would break a working setup, so take both
 	// float formats and reject only what we cannot read at all.

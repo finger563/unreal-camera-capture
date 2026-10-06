@@ -39,25 +39,47 @@ namespace CameraCaptureUtils
 	TSharedPtr<FJsonObject> TransformToJsonObject(const FTransform& Transform);
 
 	/**
-	 * A GPU readback in flight.
+	 * A GPU readback in flight, plus somewhere for its pixels to land.
 	 *
 	 * The alternative, UTextureRenderTarget2D::ReadLinearColorPixels, ends in
 	 * FlushRenderingCommands() -- it blocks the game thread until the GPU has
 	 * finished. Enqueueing a copy and collecting it a frame or two later costs
 	 * latency instead of a stall.
+	 *
+	 * Collecting it is a two-step affair because FRHIGPUTextureReadback::Lock
+	 * goes through FRHICommandListImmediate::Get(), which checks
+	 * IsInRenderingThread(): poll IsReady() on the game thread, then
+	 * BeginHarvestLinearColor to do the actual copy on the render thread, then
+	 * wait for IsHarvested(). Locking straight from the game thread asserts.
 	 */
 	struct FAsyncReadback
 	{
-		TUniquePtr<FRHIGPUTextureReadback> Readback;
+		TSharedPtr<FRHIGPUTextureReadback> Readback;
 		int32							   Width = 0;
 		int32							   Height = 0;
 		/** The source format, so the harvest knows the real stride rather than
 		 *  guessing one. PF_Unknown means "do not interpret". */
 		EPixelFormat PixelFormat = PF_Unknown;
 
+		/** Filled by the render thread; shared so it outlives this struct. */
+		TSharedPtr<TArray<FLinearColor>> Pixels;
+		/** Set by the render thread when Pixels is complete, or on failure. */
+		TSharedPtr<FThreadSafeBool> Done;
+		/** Set alongside Done when the copy could not be made. */
+		TSharedPtr<FThreadSafeBool> Failed;
+
 		bool IsPending() const { return Readback.IsValid(); }
-		bool IsReady() const { return Readback.IsValid() && Readback->IsReady(); }
-		void Reset() { Readback.Reset(); }
+		bool IsCopyReady() const { return Readback.IsValid() && Readback->IsReady(); }
+		bool IsHarvesting() const { return Done.IsValid(); }
+		bool IsHarvested() const { return Done.IsValid() && *Done; }
+		bool HasFailed() const { return Failed.IsValid() && *Failed; }
+		void Reset()
+		{
+			Readback.Reset();
+			Pixels.Reset();
+			Done.Reset();
+			Failed.Reset();
+		}
 	};
 
 	/** Start a copy of RenderTarget into Out. Returns false if it could not be
@@ -65,14 +87,13 @@ namespace CameraCaptureUtils
 	bool EnqueueReadback(UTextureRenderTarget2D* RenderTarget, FAsyncReadback& Out);
 
 	/**
-	 * Collect a finished readback as linear colour.
+	 * Kick the lock-and-copy onto the render thread. Call once IsCopyReady();
+	 * poll IsHarvested() afterwards and read Pixels.
 	 *
 	 * Handles RGBA8, RGBA16f and RGBA32f sources and refuses anything else
-	 * rather than reading at the wrong stride. Returns false and leaves OutPixels
-	 * untouched if the readback is not ready, the format is unsupported, or the
-	 * staging buffer does not hold the expected rows.
+	 * rather than reading at the wrong stride (HasFailed then reports it).
 	 */
-	bool HarvestLinearColor(FAsyncReadback& Readback, TArray<FLinearColor>& OutPixels);
+	bool BeginHarvestLinearColor(FAsyncReadback& Readback);
 
 	/**
 	 * Nearest-neighbour resample of a single-channel plane (depth).

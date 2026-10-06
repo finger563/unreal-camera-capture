@@ -70,23 +70,25 @@ namespace CameraCaptureUtils
 		Out.Width = RenderTarget->SizeX;
 		Out.Height = RenderTarget->SizeY;
 		Out.PixelFormat = GetPixelFormatFromRenderTargetFormat(RenderTarget->RenderTargetFormat);
-		Out.Readback = MakeUnique<FRHIGPUTextureReadback>(TEXT("CamCaptureReadback"));
+		Out.Readback = MakeShared<FRHIGPUTextureReadback>(TEXT("CamCaptureReadback"));
 
-		FRHIGPUTextureReadback* ReadbackPtr = Out.Readback.Get();
+		TSharedPtr<FRHIGPUTextureReadback> ReadbackPtr = Out.Readback;
 		ENQUEUE_RENDER_COMMAND(CameraCaptureUtilsEnqueueReadback)
 		(
 			[ReadbackPtr, Resource](FRHICommandListImmediate& RHICmdList) {
 				if (FRHITexture* Texture = Resource->GetRenderTargetTexture())
 				{
-					ReadbackPtr->EnqueueCopy(RHICmdList, Texture);
+					// Five-argument virtual: the two-argument convenience overload
+					// lands on an unimplemented() base and asserts.
+					ReadbackPtr->EnqueueCopy(RHICmdList, Texture, FIntVector(0, 0, 0), 0, FIntVector(0, 0, 0));
 				}
 			});
 		return true;
 	}
 
-	bool HarvestLinearColor(FAsyncReadback& Readback, TArray<FLinearColor>& OutPixels)
+	bool BeginHarvestLinearColor(FAsyncReadback& Readback)
 	{
-		if (!Readback.IsReady())
+		if (!Readback.IsCopyReady() || Readback.IsHarvesting())
 		{
 			return false;
 		}
@@ -95,83 +97,102 @@ namespace CameraCaptureUtils
 		if (Format != PF_B8G8R8A8 && Format != PF_R8G8B8A8 && Format != PF_A32B32G32R32F && Format != PF_FloatRGBA)
 		{
 			UE_LOG(LogTemp, Error,
-				TEXT("HarvestLinearColor: unsupported pixel format %d; skipping rather than reading at the wrong stride"),
+				TEXT("BeginHarvestLinearColor: unsupported pixel format %d; skipping rather than reading at the wrong stride"),
 				static_cast<int32>(Format));
 			Readback.Reset();
 			return false;
 		}
 
-		int32 RowPitchInPixels = 0;
-		int32 BufferHeight = 0;
-		void* SrcData = Readback.Readback->Lock(RowPitchInPixels, &BufferHeight);
-		if (!SrcData)
-		{
-			UE_LOG(LogTemp, Error, TEXT("HarvestLinearColor: failed to lock readback"));
-			Readback.Readback->Unlock();
-			Readback.Reset();
-			return false;
-		}
+		// Everything the render command writes into is shared, so it stays alive
+		// even if the caller drops its FAsyncReadback before the copy lands.
+		Readback.Pixels = MakeShared<TArray<FLinearColor>>();
+		Readback.Done = MakeShared<FThreadSafeBool>(false);
+		Readback.Failed = MakeShared<FThreadSafeBool>(false);
 
-		const int32 Width = Readback.Width;
-		const int32 Height = Readback.Height;
-		if (Width <= 0 || Height <= 0 || RowPitchInPixels < Width || (BufferHeight > 0 && BufferHeight < Height))
-		{
-			UE_LOG(LogTemp, Error,
-				TEXT("HarvestLinearColor: staging buffer does not hold %dx%d (pitch %d, buffer height %d)"),
-				Width, Height, RowPitchInPixels, BufferHeight);
-			Readback.Readback->Unlock();
-			Readback.Reset();
-			return false;
-		}
+		TSharedPtr<FRHIGPUTextureReadback> Rb = Readback.Readback;
+		TSharedPtr<TArray<FLinearColor>>   Pixels = Readback.Pixels;
+		TSharedPtr<FThreadSafeBool>		   Done = Readback.Done;
+		TSharedPtr<FThreadSafeBool>		   Failed = Readback.Failed;
+		const int32						   Width = Readback.Width;
+		const int32						   Height = Readback.Height;
 
-		OutPixels.SetNumUninitialized(Width * Height);
-		FLinearColor* RESTRICT Dst = OutPixels.GetData();
-
-		switch (Format)
-		{
-			case PF_A32B32G32R32F:
-			{
-				const FLinearColor* SrcRow = static_cast<const FLinearColor*>(SrcData);
-				for (int32 y = 0; y < Height; ++y)
+		ENQUEUE_RENDER_COMMAND(CameraCaptureUtilsHarvestLinearColor)
+		(
+			[Rb, Pixels, Done, Failed, Width, Height, Format](FRHICommandListImmediate& RHICmdList) {
+				// Lock is only legal here; from the game thread it asserts
+				// IsInRenderingThread() inside FRHICommandListImmediate::Get().
+				int32 RowPitchInPixels = 0;
+				int32 BufferHeight = 0;
+				void* SrcData = Rb->Lock(RowPitchInPixels, &BufferHeight);
+				if (!SrcData)
 				{
-					FMemory::Memcpy(Dst, SrcRow, Width * sizeof(FLinearColor));
-					Dst += Width;
-					SrcRow += RowPitchInPixels;
+					UE_LOG(LogTemp, Error, TEXT("BeginHarvestLinearColor: failed to lock readback"));
+					Rb->Unlock();
+					*Failed = true;
+					*Done = true;
+					return;
 				}
-				break;
-			}
-			case PF_FloatRGBA:
-			{
-				const FFloat16Color* SrcRow = static_cast<const FFloat16Color*>(SrcData);
-				for (int32 y = 0; y < Height; ++y)
+
+				if (Width <= 0 || Height <= 0 || RowPitchInPixels < Width || (BufferHeight > 0 && BufferHeight < Height))
 				{
-					for (int32 x = 0; x < Width; ++x)
+					UE_LOG(LogTemp, Error,
+						TEXT("BeginHarvestLinearColor: staging buffer does not hold %dx%d (pitch %d, buffer height %d)"),
+						Width, Height, RowPitchInPixels, BufferHeight);
+					Rb->Unlock();
+					*Failed = true;
+					*Done = true;
+					return;
+				}
+
+				Pixels->SetNumUninitialized(Width * Height);
+				FLinearColor* RESTRICT Dst = Pixels->GetData();
+
+				switch (Format)
+				{
+					case PF_A32B32G32R32F:
 					{
-						Dst[x] = FLinearColor(SrcRow[x]);
+						const FLinearColor* SrcRow = static_cast<const FLinearColor*>(SrcData);
+						for (int32 y = 0; y < Height; ++y)
+						{
+							FMemory::Memcpy(Dst, SrcRow, Width * sizeof(FLinearColor));
+							Dst += Width;
+							SrcRow += RowPitchInPixels;
+						}
+						break;
 					}
-					Dst += Width;
-					SrcRow += RowPitchInPixels;
-				}
-				break;
-			}
-			default:
-			{
-				const FColor* SrcRow = static_cast<const FColor*>(SrcData);
-				for (int32 y = 0; y < Height; ++y)
-				{
-					for (int32 x = 0; x < Width; ++x)
+					case PF_FloatRGBA:
 					{
-						Dst[x] = FLinearColor(SrcRow[x]);
+						const FFloat16Color* SrcRow = static_cast<const FFloat16Color*>(SrcData);
+						for (int32 y = 0; y < Height; ++y)
+						{
+							for (int32 x = 0; x < Width; ++x)
+							{
+								Dst[x] = FLinearColor(SrcRow[x]);
+							}
+							Dst += Width;
+							SrcRow += RowPitchInPixels;
+						}
+						break;
 					}
-					Dst += Width;
-					SrcRow += RowPitchInPixels;
+					default:
+					{
+						const FColor* SrcRow = static_cast<const FColor*>(SrcData);
+						for (int32 y = 0; y < Height; ++y)
+						{
+							for (int32 x = 0; x < Width; ++x)
+							{
+								Dst[x] = FLinearColor(SrcRow[x]);
+							}
+							Dst += Width;
+							SrcRow += RowPitchInPixels;
+						}
+						break;
+					}
 				}
-				break;
-			}
-		}
 
-		Readback.Readback->Unlock();
-		Readback.Reset();
+				Rb->Unlock();
+				*Done = true;
+			});
 		return true;
 	}
 

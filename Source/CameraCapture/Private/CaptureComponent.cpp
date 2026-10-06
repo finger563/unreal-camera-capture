@@ -575,35 +575,49 @@ void UCaptureComponent::HarvestAndWriteReadyFrames()
 		FPendingFrame& Pending = PendingFrames[i];
 		Pending.FramesWaiting++;
 
-		if (!Pending.Rgb.IsReady() || !Pending.Dmv.IsReady())
+		// Step one: the GPU copy has landed, so ask the render thread to lock the
+		// staging buffer and copy it out. Locking from here would assert --
+		// FRHIGPUTextureReadback::Lock requires the rendering thread.
+		if (!Pending.Rgb.IsHarvesting() && Pending.Rgb.IsCopyReady())
+		{
+			CameraCaptureUtils::BeginHarvestLinearColor(Pending.Rgb);
+		}
+		if (!Pending.Dmv.IsHarvesting() && Pending.Dmv.IsCopyReady())
+		{
+			CameraCaptureUtils::BeginHarvestLinearColor(Pending.Dmv);
+		}
+
+		// Step two: the render thread is done with both.
+		const bool bBothHarvested = Pending.Rgb.IsHarvested() && Pending.Dmv.IsHarvested();
+		if (!bBothHarvested)
 		{
 			if (Pending.FramesWaiting > MaxReadbackWaitFrames)
 			{
-				UE_LOG(LogTemp, Warning, TEXT("Dropping frame %d for camera %d (readback timed out after %d frames)"),
+				UE_LOG(LogTemp, Warning, TEXT("Dropping frame %d for camera %d (readback did not complete within %d frames)"),
 					Pending.FrameIndex, Pending.CameraIndex, Pending.FramesWaiting);
 				PendingFrames.RemoveAt(i);
 			}
 			continue;
 		}
 
-		// Both copies have landed; collecting them now is a memcpy, not a stall.
-		TArray<FLinearColor> rgb_data;
-		TArray<FLinearColor> dmv_data;
-		const int32			 RgbW = Pending.Rgb.Width;
-		const int32			 RgbH = Pending.Rgb.Height;
-		const int32			 DmvW = Pending.Dmv.Width;
-		const int32			 DmvH = Pending.Dmv.Height;
-
-		const bool bRgbOk = CameraCaptureUtils::HarvestLinearColor(Pending.Rgb, rgb_data);
-		const bool bDmvOk = CameraCaptureUtils::HarvestLinearColor(Pending.Dmv, dmv_data);
+		const bool bOk = !Pending.Rgb.HasFailed() && !Pending.Dmv.HasFailed()
+			&& Pending.Rgb.Pixels.IsValid() && Pending.Dmv.Pixels.IsValid();
 
 		const int32 CameraIndex = Pending.CameraIndex;
 		const int32 FrameIndex = Pending.FrameIndex;
+		const int32 RgbW = Pending.Rgb.Width;
+		const int32 RgbH = Pending.Rgb.Height;
+		const int32 DmvW = Pending.Dmv.Width;
+		const int32 DmvH = Pending.Dmv.Height;
+
+		// Keep the pixel buffers alive past the array entry we are about to drop.
+		TSharedPtr<TArray<FLinearColor>> RgbPixels = Pending.Rgb.Pixels;
+		TSharedPtr<TArray<FLinearColor>> DmvPixels = Pending.Dmv.Pixels;
 		PendingFrames.RemoveAt(i);
 
-		if (bRgbOk && bDmvOk)
+		if (bOk)
 		{
-			WriteFrame(CameraIndex, FrameIndex, rgb_data, dmv_data, RgbW, RgbH, DmvW, DmvH);
+			WriteFrame(CameraIndex, FrameIndex, *RgbPixels, *DmvPixels, RgbW, RgbH, DmvW, DmvH);
 		}
 	}
 }

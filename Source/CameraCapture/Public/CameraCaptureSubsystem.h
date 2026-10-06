@@ -317,7 +317,7 @@ protected:
 	void HarvestReadyReadbacks();
 
 	/** Enqueue an async GPU readback for a render target */
-	void EnqueueAsyncReadback(UTextureRenderTarget2D* RenderTarget, TUniquePtr<FRHIGPUTextureReadback>& OutReadback);
+	void EnqueueAsyncReadback(UTextureRenderTarget2D* RenderTarget, TSharedPtr<FRHIGPUTextureReadback>& OutReadback);
 
 	/** Build FCaptureData metadata (transform, intrinsics, etc.) without pixel data */
 	FCaptureData BuildCaptureMetadata(UIntrinsicSceneCaptureComponent2D* Camera);
@@ -352,7 +352,10 @@ protected:
 	/** Pending readback for a single camera's single channel (RGB or DMV) */
 	struct FPendingReadback
 	{
-		TUniquePtr<FRHIGPUTextureReadback> Readback;
+		// Shared, not unique: the lock and copy happen in a render command that
+		// outlives the game-thread entry this came from, and the continuation
+		// that returns it to the pool runs later still.
+		TSharedPtr<FRHIGPUTextureReadback> Readback;
 		int32							   Width = 0;
 		int32							   Height = 0;
 
@@ -390,23 +393,31 @@ protected:
 	 * staging buffers per camera every frame; EnqueueCopy resizes an existing
 	 * buffer when the texture changes, so the same object serves any camera.
 	 */
-	TArray<TUniquePtr<FRHIGPUTextureReadback>> ReadbackPool;
+	TArray<TSharedPtr<FRHIGPUTextureReadback>> ReadbackPool;
 
 	/** Enough for several cameras with both channels in flight; past this,
 	 *  returned readbacks are dropped rather than retained forever. */
 	static constexpr int32 MaxPooledReadbacks = 32;
 
 	/** Take a readback from the pool, or make one if the pool is empty. */
-	TUniquePtr<FRHIGPUTextureReadback> AcquireReadback();
+	TSharedPtr<FRHIGPUTextureReadback> AcquireReadback();
 
-	/** Return a finished readback to the pool. Safe to call with null. */
-	void ReleaseReadback(TUniquePtr<FRHIGPUTextureReadback>&& Readback);
+	/** Return a finished readback to the pool. Safe to call with null.
+	 *  Game thread only -- the pool is not synchronised. */
+	void ReleaseReadback(TSharedPtr<FRHIGPUTextureReadback> Readback);
 
-	/** Extract pixel data from a completed RGB readback into FCaptureData */
-	void HarvestRgbReadback(FPendingReadback& Readback, FCaptureData& OutData);
+	/**
+	 * Extract pixel data from a completed RGB readback into FCaptureData.
+	 *
+	 * RENDER THREAD ONLY. FRHIGPUTextureReadback::Lock goes through
+	 * FRHICommandListImmediate::Get(), which checks IsInRenderingThread() -- so
+	 * calling this from Tick asserts and takes the editor with it.
+	 */
+	static void HarvestRgbReadback(FPendingReadback& Readback, FCaptureData& OutData);
 
-	/** Extract pixel data from a completed DMV readback into FCaptureData */
-	void HarvestDmvReadback(FPendingReadback& Readback, FCaptureData& OutData);
+	/** Extract pixel data from a completed DMV readback into FCaptureData.
+	 *  RENDER THREAD ONLY; see HarvestRgbReadback. */
+	static void HarvestDmvReadback(FPendingReadback& Readback, FCaptureData& OutData);
 
 private:
 	/** Registered cameras (weak pointers to handle component destruction) */
