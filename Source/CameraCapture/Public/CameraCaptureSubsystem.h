@@ -151,6 +151,26 @@ struct CAMERACAPTURE_API FCaptureData
 };
 
 /**
+ * How the colour plane is written to disk.
+ *
+ * The capture targets are RGBA8, so colour is eight bits per channel. Writing
+ * it as EXR expands every pixel to four 32-bit floats -- sixteen bytes on disk
+ * for four bytes of information, plus the conversion. PNG keeps it at its
+ * native depth and compresses it.
+ */
+UENUM(BlueprintType)
+enum class ERammsCaptureColorFormat : uint8
+{
+	/** Colour and depth in one EXR, depth in the alpha channel. The original
+	 *  behaviour, and what existing readers expect. */
+	CombinedEXR UMETA(DisplayName = "Combined EXR (colour + depth in alpha)"),
+
+	/** Colour as PNG, depth as its own EXR. Much smaller and cheaper, but the
+	 *  two planes arrive as separate files. */
+	SeparatePNGAndEXR UMETA(DisplayName = "Separate PNG colour + EXR depth")
+};
+
+/**
  * Capture statistics for monitoring performance
  */
 USTRUCT(BlueprintType)
@@ -263,6 +283,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Camera Capture")
 	void SetSerializationEnabled(bool bEnabled);
 
+	/** How the colour plane is written. Defaults to CombinedEXR, which is what
+	 *  existing readers expect; SeparatePNGAndEXR is markedly cheaper. */
+	UFUNCTION(BlueprintCallable, Category = "Camera Capture")
+	void SetColorFormat(ERammsCaptureColorFormat Format) { ColorFormat = Format; }
+
+	UFUNCTION(BlueprintPure, Category = "Camera Capture")
+	ERammsCaptureColorFormat GetColorFormat() const { return ColorFormat; }
+
 	/** Check if serialization is enabled */
 	UFUNCTION(BlueprintPure, Category = "Camera Capture")
 	bool IsSerializationEnabled() const { return bSerializationEnabled; }
@@ -298,10 +326,12 @@ protected:
 	void SerializeCaptureData(TSharedRef<const FCaptureData> Data);
 
 	/** Write EXR file with 6 channels (RGB + Depth + Motion) — called from background thread */
-	static bool WriteEXRFile_Static(const FString& FilePath, const FCaptureData& Data, bool bCaptureRGB, bool bCaptureDepth, bool bCaptureMotionVectors);
+	static bool WriteEXRFile_Static(const FString& FilePath, const FCaptureData& Data, bool bCaptureRGB, bool bCaptureDepth, bool bCaptureMotionVectors,
+		ERammsCaptureColorFormat Format = ERammsCaptureColorFormat::CombinedEXR);
 
 	/** Write metadata JSON file — called from background thread */
-	static bool WriteMetadataFile_Static(const FString& FilePath, const FCaptureData& Data);
+	static bool WriteMetadataFile_Static(const FString& FilePath, const FCaptureData& Data,
+		ERammsCaptureColorFormat Format = ERammsCaptureColorFormat::CombinedEXR);
 
 	/** Generate unique camera ID, handling collisions */
 	FCameraIdentifier GenerateCameraID(UIntrinsicSceneCaptureComponent2D* Camera);
@@ -352,6 +382,26 @@ protected:
 	/** Maximum frames to wait for a readback before discarding */
 	static constexpr int32 MaxReadbackWaitFrames = 10;
 
+	/**
+	 * Readback objects kept for reuse rather than reallocated every frame.
+	 *
+	 * Each FRHIGPUTextureReadback owns a GPU staging buffer. Allocating one per
+	 * camera per channel per capture frame meant creating and destroying two
+	 * staging buffers per camera every frame; EnqueueCopy resizes an existing
+	 * buffer when the texture changes, so the same object serves any camera.
+	 */
+	TArray<TUniquePtr<FRHIGPUTextureReadback>> ReadbackPool;
+
+	/** Enough for several cameras with both channels in flight; past this,
+	 *  returned readbacks are dropped rather than retained forever. */
+	static constexpr int32 MaxPooledReadbacks = 32;
+
+	/** Take a readback from the pool, or make one if the pool is empty. */
+	TUniquePtr<FRHIGPUTextureReadback> AcquireReadback();
+
+	/** Return a finished readback to the pool. Safe to call with null. */
+	void ReleaseReadback(TUniquePtr<FRHIGPUTextureReadback>&& Readback);
+
 	/** Extract pixel data from a completed RGB readback into FCaptureData */
 	void HarvestRgbReadback(FPendingReadback& Readback, FCaptureData& OutData);
 
@@ -396,6 +446,9 @@ private:
 
 	/** Whether to automatically serialize captured data to disk */
 	bool bSerializationEnabled = true;
+
+	/** Colour output format; see ERammsCaptureColorFormat. */
+	ERammsCaptureColorFormat ColorFormat = ERammsCaptureColorFormat::CombinedEXR;
 
 	/** Last capture duration (for statistics) */
 	float LastCaptureDurationMs = 0.0f;

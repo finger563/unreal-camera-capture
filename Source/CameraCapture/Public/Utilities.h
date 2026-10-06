@@ -2,6 +2,8 @@
 
 #include "CoreMinimal.h"
 #include "CameraIntrinsics.h"
+#include "RHIGPUReadback.h"
+#include "PixelFormat.h"
 #include "Dom/JsonObject.h"
 
 // Forward declarations
@@ -37,6 +39,42 @@ namespace CameraCaptureUtils
 	TSharedPtr<FJsonObject> TransformToJsonObject(const FTransform& Transform);
 
 	/**
+	 * A GPU readback in flight.
+	 *
+	 * The alternative, UTextureRenderTarget2D::ReadLinearColorPixels, ends in
+	 * FlushRenderingCommands() -- it blocks the game thread until the GPU has
+	 * finished. Enqueueing a copy and collecting it a frame or two later costs
+	 * latency instead of a stall.
+	 */
+	struct FAsyncReadback
+	{
+		TUniquePtr<FRHIGPUTextureReadback> Readback;
+		int32							   Width = 0;
+		int32							   Height = 0;
+		/** The source format, so the harvest knows the real stride rather than
+		 *  guessing one. PF_Unknown means "do not interpret". */
+		EPixelFormat PixelFormat = PF_Unknown;
+
+		bool IsPending() const { return Readback.IsValid(); }
+		bool IsReady() const { return Readback.IsValid() && Readback->IsReady(); }
+		void Reset() { Readback.Reset(); }
+	};
+
+	/** Start a copy of RenderTarget into Out. Returns false if it could not be
+	 *  started, in which case Out is left not pending. */
+	bool EnqueueReadback(UTextureRenderTarget2D* RenderTarget, FAsyncReadback& Out);
+
+	/**
+	 * Collect a finished readback as linear colour.
+	 *
+	 * Handles RGBA8, RGBA16f and RGBA32f sources and refuses anything else
+	 * rather than reading at the wrong stride. Returns false and leaves OutPixels
+	 * untouched if the readback is not ready, the format is unsupported, or the
+	 * staging buffer does not hold the expected rows.
+	 */
+	bool HarvestLinearColor(FAsyncReadback& Readback, TArray<FLinearColor>& OutPixels);
+
+	/**
 	 * Nearest-neighbour resample of a single-channel plane (depth).
 	 *
 	 * Nearest rather than bilinear on purpose: depth is not a continuous signal
@@ -60,6 +98,14 @@ namespace CameraCaptureUtils
 	 * Takes Pixels by value so a caller can MoveTemp into it; the buffer is then
 	 * moved again into the write task and never copied.
 	 */
+	/**
+	 * Enqueue an 8-bit colour buffer as a PNG.
+	 *
+	 * The capture targets are RGBA8, so this writes colour at the depth it was
+	 * captured at instead of expanding every pixel to four 32-bit floats.
+	 */
+	bool WritePNGPixels(const FString& FilePath, TArray64<FColor> Pixels, int32 Width, int32 Height);
+
 	bool WriteEXRPixels(const FString& FilePath, TArray64<FLinearColor> Pixels, int32 Width, int32 Height);
 
 	/**

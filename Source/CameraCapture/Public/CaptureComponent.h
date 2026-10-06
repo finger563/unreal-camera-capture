@@ -129,7 +129,33 @@ protected:
 
 	// Data capture functions
 	void CaptureData();
-	void SaveData();
+
+	/** One camera's capture waiting on the GPU. */
+	struct FPendingFrame
+	{
+		int32							   CameraIndex = INDEX_NONE;
+		int32							   FrameIndex = 0;
+		int32							   FramesWaiting = 0;
+		CameraCaptureUtils::FAsyncReadback Rgb;
+		CameraCaptureUtils::FAsyncReadback Dmv;
+	};
+
+	/** Captures whose GPU copies have not landed yet. */
+	TArray<FPendingFrame> PendingFrames;
+
+	/** Give up on a readback after this many frames rather than holding its
+	 *  staging buffer forever. */
+	static constexpr int32 MaxReadbackWaitFrames = 10;
+
+	/** Poll PendingFrames and write out the ones that have arrived. */
+	void HarvestAndWriteReadyFrames();
+
+	/** Write one harvested frame to disk. */
+	void WriteFrame(int32 CameraIndex, int32 FrameIndex, const TArray<FLinearColor>& rgb_data, const TArray<FLinearColor>& dmv_data, int32 RgbW, int32 RgbH, int32 DmvW, int32 DmvH);
+
+	/** Output directories already created, so we do not stat the same path
+	 *  every frame. */
+	TSet<FString> DirectoriesEnsured;
 
 	// Timer for handling state update and rendering
 	FTimerHandle CaptureTimerHandle;
@@ -137,7 +163,6 @@ protected:
 	int	 ImageIndex = 0;
 	bool ShouldCaptureData = true;
 	bool ShouldSaveData = false;
-	bool DeferredCaptureReady = false;
 	bool HasInitializedFiles = false;
 
 	FString TransformFile;

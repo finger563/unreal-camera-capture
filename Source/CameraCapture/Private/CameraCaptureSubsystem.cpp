@@ -95,6 +95,10 @@ void UCameraCaptureSubsystem::Deinitialize()
 	// Drop any pending readbacks
 	PendingCaptures.Empty();
 
+	// And the pooled ones, so their GPU staging buffers go with the subsystem
+	// rather than outliving it.
+	ReadbackPool.Empty();
+
 	// Clear all registrations
 	RegisteredCameras.Empty();
 	CameraIDMap.Empty();
@@ -604,6 +608,65 @@ void UCameraCaptureSubsystem::KickAllCaptures()
 		KickedCount, ElapsedMs, FrameIdCounter, PendingCaptures.Num());
 }
 
+namespace
+{
+	/**
+	 * Create an output directory at most once per path per session.
+	 *
+	 * The serializer used to stat and create the camera's directory on every
+	 * frame -- two filesystem calls per camera per frame, for a path that
+	 * changes only when a camera is added. Shared because serialization runs on
+	 * background tasks that can overlap.
+	 */
+	void EnsureOutputDirectoryOnce(const FString& CameraPath)
+	{
+		static FCriticalSection Lock;
+		static TSet<FString>	Created;
+		{
+			FScopeLock Guard(&Lock);
+			if (Created.Contains(CameraPath))
+			{
+				return;
+			}
+		}
+
+		if (!IFileManager::Get().DirectoryExists(*CameraPath))
+		{
+			IFileManager::Get().MakeDirectory(*CameraPath, true);
+		}
+
+		FScopeLock Guard(&Lock);
+		Created.Add(CameraPath);
+	}
+} // namespace
+
+TUniquePtr<FRHIGPUTextureReadback> UCameraCaptureSubsystem::AcquireReadback()
+{
+	if (ReadbackPool.Num() > 0)
+	{
+		return ReadbackPool.Pop(EAllowShrinking::No);
+	}
+	return MakeUnique<FRHIGPUTextureReadback>(TEXT("CamCaptureReadback"));
+}
+
+void UCameraCaptureSubsystem::ReleaseReadback(TUniquePtr<FRHIGPUTextureReadback>&& Readback)
+{
+	if (!Readback)
+	{
+		return;
+	}
+	// Past the cap the object is simply destroyed. Holding every readback a
+	// burst ever needed would keep its staging buffer alive for the session.
+	if (ReadbackPool.Num() < MaxPooledReadbacks)
+	{
+		ReadbackPool.Add(MoveTemp(Readback));
+	}
+	else
+	{
+		Readback.Reset();
+	}
+}
+
 void UCameraCaptureSubsystem::EnqueueAsyncReadback(UTextureRenderTarget2D* RenderTarget, TUniquePtr<FRHIGPUTextureReadback>& OutReadback)
 {
 	if (!RenderTarget)
@@ -618,7 +681,10 @@ void UCameraCaptureSubsystem::EnqueueAsyncReadback(UTextureRenderTarget2D* Rende
 		return;
 	}
 
-	OutReadback = MakeUnique<FRHIGPUTextureReadback>(TEXT("CamCaptureReadback"));
+	// Reused rather than allocated: each one owns a GPU staging buffer, and
+	// EnqueueCopy resizes it when the texture differs, so one object serves any
+	// camera. This used to allocate two per camera every capture frame.
+	OutReadback = AcquireReadback();
 
 	FRHIGPUTextureReadback*		  ReadbackPtr = OutReadback.Get();
 	FTextureRenderTargetResource* ResourcePtr = RTResource;
@@ -669,6 +735,11 @@ void UCameraCaptureSubsystem::HarvestReadyReadbacks()
 				HarvestDmvReadback(Pending.DmvReadback, Data);
 			}
 
+			// Readbacks are finished with at this point; hand them back before
+			// the pending entry is destroyed so the buffers get reused.
+			ReleaseReadback(MoveTemp(Pending.RgbReadback.Readback));
+			ReleaseReadback(MoveTemp(Pending.DmvReadback.Readback));
+
 			// Wrap in shared ref so listeners can safely retain the data
 			TSharedRef<const FCaptureData> SharedData = MakeShared<FCaptureData>(MoveTemp(Data));
 
@@ -688,6 +759,9 @@ void UCameraCaptureSubsystem::HarvestReadyReadbacks()
 		{
 			UE_LOG(LogTemp, Warning, TEXT("[CameraCaptureSubsystem] Dropping capture for %s (readback timed out after %d frames)"),
 				*Pending.Metadata.CameraID.ToString(), Pending.FramesWaiting);
+			// A timed-out readback is not known to be finished on the GPU, so it
+			// is destroyed rather than pooled -- reusing it could enqueue a copy
+			// into a buffer still being written.
 			PendingCaptures.RemoveAt(i);
 		}
 	}
@@ -983,14 +1057,15 @@ void UCameraCaptureSubsystem::EnsureCameraRenderTarget(UIntrinsicSceneCaptureCom
 
 void UCameraCaptureSubsystem::SerializeCaptureData(TSharedRef<const FCaptureData> Data)
 {
-	FString OutputDir = OutputDirectory;
-	bool	bRGB = bCaptureRGB;
-	bool	bDepth = bCaptureDepth;
-	bool	bMotion = bCaptureMotionVectors;
+	FString						   OutputDir = OutputDirectory;
+	bool						   bRGB = bCaptureRGB;
+	bool						   bDepth = bCaptureDepth;
+	bool						   bMotion = bCaptureMotionVectors;
+	const ERammsCaptureColorFormat Format = ColorFormat;
 
 	// Lambda captures the shared ref — keeps data alive until async write completes
 	AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
-		[Data, OutputDir, bRGB, bDepth, bMotion]() {
+		[Data, OutputDir, bRGB, bDepth, bMotion, Format]() {
 			FString AbsoluteOutputDir = OutputDir;
 			if (FPaths::IsRelative(AbsoluteOutputDir))
 			{
@@ -999,24 +1074,22 @@ void UCameraCaptureSubsystem::SerializeCaptureData(TSharedRef<const FCaptureData
 
 			FString CameraPath = Data->CameraID.GetFullPath(AbsoluteOutputDir);
 
-			if (!IFileManager::Get().DirectoryExists(*CameraPath))
-			{
-				IFileManager::Get().MakeDirectory(*CameraPath, true);
-			}
+			EnsureOutputDirectoryOnce(CameraPath);
 
 			FString FrameNumberStr = FString::Printf(TEXT("%07lld"), Data->FrameNumber);
 
 			// Write EXR
 			FString ExrPath = FPaths::Combine(CameraPath, FString::Printf(TEXT("frame_%s.exr"), *FrameNumberStr));
-			WriteEXRFile_Static(ExrPath, *Data, bRGB, bDepth, bMotion);
+			WriteEXRFile_Static(ExrPath, *Data, bRGB, bDepth, bMotion, Format);
 
 			// Write metadata JSON
 			FString MetadataPath = FPaths::Combine(CameraPath, FString::Printf(TEXT("frame_%s.json"), *FrameNumberStr));
-			WriteMetadataFile_Static(MetadataPath, *Data);
+			WriteMetadataFile_Static(MetadataPath, *Data, Format);
 		});
 }
 
-bool UCameraCaptureSubsystem::WriteEXRFile_Static(const FString& FilePath, const FCaptureData& Data, bool bCaptureRGB, bool bCaptureDepth, bool bCaptureMotionVectors)
+bool UCameraCaptureSubsystem::WriteEXRFile_Static(const FString& FilePath, const FCaptureData& Data, bool bCaptureRGB, bool bCaptureDepth, bool bCaptureMotionVectors,
+	ERammsCaptureColorFormat Format)
 {
 	// Safety checks
 	if (Data.Width <= 0 || Data.Height <= 0)
@@ -1075,6 +1148,62 @@ bool UCameraCaptureSubsystem::WriteEXRFile_Static(const FString& FilePath, const
 		}
 	}
 	const bool bDepthInAlpha = DepthOnColourGrid.Num() == NumPixels;
+
+	if (Format == ERammsCaptureColorFormat::SeparatePNGAndEXR)
+	{
+		// Colour at the depth it was captured at. The combined path below has to
+		// promote it to float because EXR carries the depth channel alongside;
+		// written on its own it stays 8-bit and compresses.
+		if (bHaveRgb)
+		{
+			TArray64<FColor> ColorPixels;
+			ColorPixels.SetNumUninitialized(NumPixels);
+			FMemory::Memcpy(ColorPixels.GetData(), Data.ImageData.GetData(), static_cast<SIZE_T>(NumPixels) * sizeof(FColor));
+
+			const FString ColorPath = FilePath.Replace(TEXT(".exr"), TEXT(".png"));
+			if (!CameraCaptureUtils::WritePNGPixels(ColorPath, MoveTemp(ColorPixels), Data.Width, Data.Height))
+			{
+				UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Failed to write colour PNG: %s"), *ColorPath);
+			}
+		}
+
+		// Depth keeps its own grid; nothing is resampled, because there is no
+		// shared file forcing the two onto one raster.
+		if (bHaveDepth)
+		{
+			TArray64<FLinearColor> DepthOut;
+			DepthOut.SetNumUninitialized(DepthPixels);
+			FLinearColor* RESTRICT Dst = DepthOut.GetData();
+			const float* RESTRICT  Src = Data.DepthData.GetData();
+			for (int32 i = 0; i < DepthPixels; i++)
+			{
+				Dst[i] = FLinearColor(Src[i], 0.0f, 0.0f, Src[i]);
+			}
+
+			const FString DepthPath = FilePath.Replace(TEXT(".exr"), TEXT("_depth.exr"));
+			if (!CameraCaptureUtils::WriteEXRPixels(DepthPath, MoveTemp(DepthOut), DepthWidth, DepthHeight))
+			{
+				UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Failed to write depth EXR: %s"), *DepthPath);
+				return false;
+			}
+		}
+
+		if (bHaveMotion)
+		{
+			TArray64<FLinearColor> MotionPixels;
+			MotionPixels.SetNumUninitialized(DepthPixels);
+			FLinearColor* RESTRICT	  MotionOut = MotionPixels.GetData();
+			const FVector2D* RESTRICT SrcMotion = Data.MotionVectorData.GetData();
+			for (int32 i = 0; i < DepthPixels; i++)
+			{
+				MotionOut[i] = FLinearColor(static_cast<float>(SrcMotion[i].X), static_cast<float>(SrcMotion[i].Y), 0.0f, 0.0f);
+			}
+			const FString MotionPath = FilePath.Replace(TEXT(".exr"), TEXT("_motion.exr"));
+			CameraCaptureUtils::WriteEXRPixels(MotionPath, MoveTemp(MotionPixels), DepthWidth, DepthHeight);
+		}
+
+		return true;
+	}
 
 	// One pass, one buffer. The previous version built two full FLinearColor
 	// arrays here and WriteEXRFile built a third, so every frame allocated and
@@ -1155,7 +1284,8 @@ bool UCameraCaptureSubsystem::WriteEXRFile_Static(const FString& FilePath, const
 	return true;
 }
 
-bool UCameraCaptureSubsystem::WriteMetadataFile_Static(const FString& FilePath, const FCaptureData& Data)
+bool UCameraCaptureSubsystem::WriteMetadataFile_Static(const FString& FilePath, const FCaptureData& Data,
+	ERammsCaptureColorFormat Format)
 {
 	// Create JSON object
 	TSharedPtr<FJsonObject> JsonObject = MakeShared<FJsonObject>();
@@ -1195,6 +1325,12 @@ bool UCameraCaptureSubsystem::WriteMetadataFile_Static(const FString& FilePath, 
 		// values are in frame_N_depth.exr when it is the latter.
 		JsonObject->SetBoolField(TEXT("depth_resampled_into_alpha"), Data.HasMismatchedDepthResolution());
 	}
+
+	// Which files this frame produced, so a reader does not have to guess
+	// whether colour is in the EXR's RGB channels or beside it as a PNG.
+	const bool bSeparate = Format == ERammsCaptureColorFormat::SeparatePNGAndEXR;
+	JsonObject->SetStringField(TEXT("color_format"), bSeparate ? TEXT("png") : TEXT("exr"));
+	JsonObject->SetStringField(TEXT("layout"), bSeparate ? TEXT("separate") : TEXT("combined"));
 
 	JsonObject->SetStringField(TEXT("actor_path"), Data.ActorPath);
 	JsonObject->SetStringField(TEXT("level_name"), Data.LevelName);

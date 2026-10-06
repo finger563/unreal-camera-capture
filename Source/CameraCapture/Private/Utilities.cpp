@@ -1,5 +1,7 @@
 #include "Utilities.h"
 #include "Components/SceneCaptureComponent2D.h"
+#include "Engine/TextureRenderTarget2D.h"
+#include "RenderGraphUtils.h"
 #include "ImageWriteQueue.h"
 #include "ImageWriteTask.h"
 #include "ImagePixelData.h"
@@ -50,6 +52,129 @@ namespace CameraCaptureUtils
 		return Obj;
 	}
 
+	bool EnqueueReadback(UTextureRenderTarget2D* RenderTarget, FAsyncReadback& Out)
+	{
+		Out.Reset();
+		if (!RenderTarget)
+		{
+			return false;
+		}
+
+		FTextureRenderTargetResource* Resource = RenderTarget->GameThread_GetRenderTargetResource();
+		if (!Resource)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("EnqueueReadback: no render target resource"));
+			return false;
+		}
+
+		Out.Width = RenderTarget->SizeX;
+		Out.Height = RenderTarget->SizeY;
+		Out.PixelFormat = GetPixelFormatFromRenderTargetFormat(RenderTarget->RenderTargetFormat);
+		Out.Readback = MakeUnique<FRHIGPUTextureReadback>(TEXT("CamCaptureReadback"));
+
+		FRHIGPUTextureReadback* ReadbackPtr = Out.Readback.Get();
+		ENQUEUE_RENDER_COMMAND(CameraCaptureUtilsEnqueueReadback)
+		(
+			[ReadbackPtr, Resource](FRHICommandListImmediate& RHICmdList) {
+				if (FRHITexture* Texture = Resource->GetRenderTargetTexture())
+				{
+					ReadbackPtr->EnqueueCopy(RHICmdList, Texture);
+				}
+			});
+		return true;
+	}
+
+	bool HarvestLinearColor(FAsyncReadback& Readback, TArray<FLinearColor>& OutPixels)
+	{
+		if (!Readback.IsReady())
+		{
+			return false;
+		}
+
+		const EPixelFormat Format = Readback.PixelFormat;
+		if (Format != PF_B8G8R8A8 && Format != PF_R8G8B8A8 && Format != PF_A32B32G32R32F && Format != PF_FloatRGBA)
+		{
+			UE_LOG(LogTemp, Error,
+				TEXT("HarvestLinearColor: unsupported pixel format %d; skipping rather than reading at the wrong stride"),
+				static_cast<int32>(Format));
+			Readback.Reset();
+			return false;
+		}
+
+		int32 RowPitchInPixels = 0;
+		int32 BufferHeight = 0;
+		void* SrcData = Readback.Readback->Lock(RowPitchInPixels, &BufferHeight);
+		if (!SrcData)
+		{
+			UE_LOG(LogTemp, Error, TEXT("HarvestLinearColor: failed to lock readback"));
+			Readback.Readback->Unlock();
+			Readback.Reset();
+			return false;
+		}
+
+		const int32 Width = Readback.Width;
+		const int32 Height = Readback.Height;
+		if (Width <= 0 || Height <= 0 || RowPitchInPixels < Width || (BufferHeight > 0 && BufferHeight < Height))
+		{
+			UE_LOG(LogTemp, Error,
+				TEXT("HarvestLinearColor: staging buffer does not hold %dx%d (pitch %d, buffer height %d)"),
+				Width, Height, RowPitchInPixels, BufferHeight);
+			Readback.Readback->Unlock();
+			Readback.Reset();
+			return false;
+		}
+
+		OutPixels.SetNumUninitialized(Width * Height);
+		FLinearColor* RESTRICT Dst = OutPixels.GetData();
+
+		switch (Format)
+		{
+			case PF_A32B32G32R32F:
+			{
+				const FLinearColor* SrcRow = static_cast<const FLinearColor*>(SrcData);
+				for (int32 y = 0; y < Height; ++y)
+				{
+					FMemory::Memcpy(Dst, SrcRow, Width * sizeof(FLinearColor));
+					Dst += Width;
+					SrcRow += RowPitchInPixels;
+				}
+				break;
+			}
+			case PF_FloatRGBA:
+			{
+				const FFloat16Color* SrcRow = static_cast<const FFloat16Color*>(SrcData);
+				for (int32 y = 0; y < Height; ++y)
+				{
+					for (int32 x = 0; x < Width; ++x)
+					{
+						Dst[x] = FLinearColor(SrcRow[x]);
+					}
+					Dst += Width;
+					SrcRow += RowPitchInPixels;
+				}
+				break;
+			}
+			default:
+			{
+				const FColor* SrcRow = static_cast<const FColor*>(SrcData);
+				for (int32 y = 0; y < Height; ++y)
+				{
+					for (int32 x = 0; x < Width; ++x)
+					{
+						Dst[x] = FLinearColor(SrcRow[x]);
+					}
+					Dst += Width;
+					SrcRow += RowPitchInPixels;
+				}
+				break;
+			}
+		}
+
+		Readback.Readback->Unlock();
+		Readback.Reset();
+		return true;
+	}
+
 	TArray<float> ResampleDepthNearest(const TArray<float>& Src, int32 SrcW, int32 SrcH, int32 DstW, int32 DstH)
 	{
 		if (SrcW <= 0 || SrcH <= 0 || DstW <= 0 || DstH <= 0)
@@ -86,6 +211,36 @@ namespace CameraCaptureUtils
 			}
 		}
 		return Out;
+	}
+
+	bool WritePNGPixels(const FString& FilePath, TArray64<FColor> Pixels, int32 Width, int32 Height)
+	{
+		IImageWriteQueueModule* ImageWriteQueueModule = FModuleManager::Get().GetModulePtr<IImageWriteQueueModule>("ImageWriteQueue");
+		if (!ImageWriteQueueModule)
+		{
+			UE_LOG(LogTemp, Error, TEXT("Failed to load ImageWriteQueue module"));
+			return false;
+		}
+
+		if (Width <= 0 || Height <= 0 || Pixels.Num() != static_cast<int64>(Width) * Height)
+		{
+			UE_LOG(LogTemp, Error, TEXT("WritePNGPixels: %lld pixels does not match %dx%d"), Pixels.Num(), Width, Height);
+			return false;
+		}
+
+		TUniquePtr<TImagePixelData<FColor>> PixelData = MakeUnique<TImagePixelData<FColor>>(
+			FIntPoint(Width, Height),
+			MoveTemp(Pixels));
+
+		TUniquePtr<FImageWriteTask> ImageTask = MakeUnique<FImageWriteTask>();
+		ImageTask->PixelData = MoveTemp(PixelData);
+		ImageTask->Filename = FilePath;
+		ImageTask->Format = EImageFormat::PNG;
+		ImageTask->CompressionQuality = (int32)EImageCompressionQuality::Default;
+		ImageTask->bOverwriteFile = true;
+
+		ImageWriteQueueModule->GetWriteQueue().Enqueue(MoveTemp(ImageTask));
+		return true;
 	}
 
 	bool WriteEXRPixels(const FString& FilePath, TArray64<FLinearColor> Pixels, int32 Width, int32 Height)
