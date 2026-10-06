@@ -610,12 +610,63 @@ void UCaptureComponent::SaveData()
 		FString dmv_filename = FPaths::Combine(*CameraPath, FString::Printf(TEXT("frame_%s_motion.exr"), *FrameNumberStr));
 		FString metadata_filename = FPaths::Combine(*CameraPath, FString::Printf(TEXT("frame_%s.json"), *FrameNumberStr));
 
-		// Use shared utility functions
-		// Write RGB+Depth EXR (RGB in RGB channels, Depth in Alpha channel)
-		CameraCaptureUtils::WriteEXRFile(rgb_filename, rgb_data, dmv_data, rgb_rt->SizeX, rgb_rt->SizeY, true);
+		// The depth/motion target can be a different size than the colour one
+		// when the camera has separate depth intrinsics. Passing dmv_data with the
+		// colour dimensions failed WriteEXRFile's size check, so the RGB+Depth EXR
+		// was never written at all -- one error log per frame and no data.
+		const bool bSameGrid = (dmv_rt->SizeX == rgb_rt->SizeX && dmv_rt->SizeY == rgb_rt->SizeY);
 
-		// Write Motion Vectors EXR (X in R, Y in G channels)
+		TArray<FLinearColor> dmv_on_colour_grid;
+		if (bSameGrid)
+		{
+			dmv_on_colour_grid = dmv_data;
+		}
+		else
+		{
+			// Only the depth channel has to reach the colour grid; the motion
+			// vectors stay in their own file at their own resolution, because a
+			// resampled vector no longer matches the pixels it was measured in.
+			TArray<float> depth;
+			depth.SetNumUninitialized(dmv_data.Num());
+			for (int32 p = 0; p < dmv_data.Num(); ++p)
+			{
+				depth[p] = dmv_data[p].R;
+			}
+
+			const TArray<float> resampled = CameraCaptureUtils::ResampleDepthNearest(
+				depth, dmv_rt->SizeX, dmv_rt->SizeY, rgb_rt->SizeX, rgb_rt->SizeY);
+
+			if (resampled.Num() == rgb_rt->SizeX * rgb_rt->SizeY)
+			{
+				dmv_on_colour_grid.SetNumUninitialized(resampled.Num());
+				for (int32 p = 0; p < resampled.Num(); ++p)
+				{
+					dmv_on_colour_grid[p] = FLinearColor(resampled[p], 0.0f, 0.0f, 0.0f);
+				}
+			}
+			else
+			{
+				UE_LOG(LogTemp, Error, TEXT("Could not resample depth %dx%d onto colour %dx%d for %s"),
+					dmv_rt->SizeX, dmv_rt->SizeY, rgb_rt->SizeX, rgb_rt->SizeY, *CameraName);
+			}
+		}
+
+		// Write RGB+Depth EXR (RGB in RGB channels, Depth in Alpha channel)
+		if (dmv_on_colour_grid.Num() == rgb_data.Num())
+		{
+			CameraCaptureUtils::WriteEXRFile(rgb_filename, rgb_data, dmv_on_colour_grid, rgb_rt->SizeX, rgb_rt->SizeY, true);
+		}
+
+		// Write Motion Vectors EXR (X in R, Y in G channels) at the depth grid
 		CameraCaptureUtils::WriteEXRFile(dmv_filename, dmv_data, dmv_data, dmv_rt->SizeX, dmv_rt->SizeY, false);
+
+		// With differing grids the alpha channel above is resampled, so also emit
+		// the measured depth at its own resolution.
+		if (!bSameGrid)
+		{
+			const FString depth_filename = FPaths::Combine(*CameraPath, FString::Printf(TEXT("frame_%s_depth.exr"), *FrameNumberStr));
+			CameraCaptureUtils::WriteEXRFile(depth_filename, dmv_data, dmv_data, dmv_rt->SizeX, dmv_rt->SizeY, true);
+		}
 
 		// Write metadata JSON
 		FString ActorPath = GetOwner() ? GetOwner()->GetPathName() : TEXT("");

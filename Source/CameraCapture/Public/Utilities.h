@@ -37,6 +37,32 @@ namespace CameraCaptureUtils
 	TSharedPtr<FJsonObject> TransformToJsonObject(const FTransform& Transform);
 
 	/**
+	 * Nearest-neighbour resample of a single-channel plane (depth).
+	 *
+	 * Nearest rather than bilinear on purpose: depth is not a continuous signal
+	 * across an object boundary, and averaging across one invents a surface that
+	 * is in front of the far object and behind the near one. A resampled depth
+	 * map should contain only distances the scene actually had.
+	 *
+	 * Returns Src unchanged when the sizes already agree, and an empty array if
+	 * any dimension is non-positive or Src is not SrcW*SrcH long.
+	 */
+	TArray<float> ResampleDepthNearest(const TArray<float>& Src, int32 SrcW, int32 SrcH, int32 DstW, int32 DstH);
+
+	/**
+	 * Enqueue an already-composed pixel buffer as an EXR.
+	 *
+	 * This is the one place that talks to ImageWriteQueue. Callers that already
+	 * have the final pixels hand them over directly instead of building a
+	 * separate RGB and DMV array for a helper to interleave -- the old path cost
+	 * three full-frame buffers per file to emit one.
+	 *
+	 * Takes Pixels by value so a caller can MoveTemp into it; the buffer is then
+	 * moved again into the write task and never copied.
+	 */
+	bool WriteEXRPixels(const FString& FilePath, TArray64<FLinearColor> Pixels, int32 Width, int32 Height);
+
+	/**
 	 * Write image data to EXR file using ImageWriteQueue
 	 * @param FilePath - Output file path
 	 * @param RgbData - RGB image data

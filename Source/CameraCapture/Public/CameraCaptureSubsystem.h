@@ -4,6 +4,7 @@
 #include "Subsystems/WorldSubsystem.h"
 #include "CameraIntrinsics.h"
 #include "RHIGPUReadback.h"
+#include "PixelFormat.h"
 #include "Async/Async.h"
 #include "CameraCaptureSubsystem.generated.h"
 
@@ -121,6 +122,24 @@ struct CAMERACAPTURE_API FCaptureData
 	/** Image height in pixels */
 	UPROPERTY(BlueprintReadOnly, Category = "Capture Data")
 	int32 Height = 0;
+
+	/** Depth/motion width in pixels. A camera with separate depth intrinsics
+	 *  captures depth at its own resolution, so DepthData and MotionVectorData
+	 *  are NOT Width*Height in general -- index them by these instead. Zero
+	 *  means no depth was captured; equal to Width/Height in the common case. */
+	UPROPERTY(BlueprintReadOnly, Category = "Capture Data")
+	int32 DepthWidth = 0;
+
+	/** Depth/motion height in pixels. See DepthWidth. */
+	UPROPERTY(BlueprintReadOnly, Category = "Capture Data")
+	int32 DepthHeight = 0;
+
+	/** True when depth was captured at a different resolution than colour, so a
+	 *  consumer that needs them aligned has to resample one of them. */
+	bool HasMismatchedDepthResolution() const
+	{
+		return DepthWidth > 0 && DepthHeight > 0 && (DepthWidth != Width || DepthHeight != Height);
+	}
 
 	/** Actor path in world */
 	UPROPERTY(BlueprintReadOnly, Category = "Capture Data")
@@ -306,7 +325,14 @@ protected:
 		TUniquePtr<FRHIGPUTextureReadback> Readback;
 		int32							   Width = 0;
 		int32							   Height = 0;
-		bool							   bIsFloat = false; // true for RGBA32f (DMV), false for RGBA8 (RGB)
+
+		// The render target's actual pixel format, not a guess at its width. A
+		// readback is raw GPU memory, so the harvest has to know the real stride:
+		// this used to be a bool that grouped RGBA16f with RGBA32f, and since
+		// RGBA16f is PF_FloatRGBA (8 bytes/pixel) while the harvest read
+		// FLinearColor (16), it walked twice the staging buffer and corrupted the
+		// heap. PF_Unknown means "do not interpret" rather than "assume 8-bit".
+		EPixelFormat PixelFormat = PF_Unknown;
 	};
 
 	/** All pending state for a single camera in a single frame */

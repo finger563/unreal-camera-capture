@@ -50,12 +50,45 @@ namespace CameraCaptureUtils
 		return Obj;
 	}
 
-	bool WriteEXRFile(const FString& FilePath,
-		const TArray<FLinearColor>&	 RgbData,
-		const TArray<FLinearColor>&	 DmvData,
-		int32						 Width,
-		int32						 Height,
-		bool						 bIncludeDepth)
+	TArray<float> ResampleDepthNearest(const TArray<float>& Src, int32 SrcW, int32 SrcH, int32 DstW, int32 DstH)
+	{
+		if (SrcW <= 0 || SrcH <= 0 || DstW <= 0 || DstH <= 0)
+		{
+			return TArray<float>();
+		}
+		if (Src.Num() != SrcW * SrcH)
+		{
+			UE_LOG(LogTemp, Error, TEXT("ResampleDepthNearest: source is %d values, expected %dx%d"), Src.Num(), SrcW, SrcH);
+			return TArray<float>();
+		}
+		if (SrcW == DstW && SrcH == DstH)
+		{
+			return Src;
+		}
+
+		TArray<float> Out;
+		Out.SetNumUninitialized(DstW * DstH);
+
+		// Map destination pixel centres into the source grid, so the result is
+		// centred rather than biased towards the origin by half a pixel.
+		const double ScaleX = static_cast<double>(SrcW) / static_cast<double>(DstW);
+		const double ScaleY = static_cast<double>(SrcH) / static_cast<double>(DstH);
+
+		for (int32 y = 0; y < DstH; ++y)
+		{
+			const int32			  SrcY = FMath::Clamp(static_cast<int32>((y + 0.5) * ScaleY), 0, SrcH - 1);
+			const float* RESTRICT SrcRow = Src.GetData() + static_cast<SIZE_T>(SrcY) * SrcW;
+			float* RESTRICT		  DstRow = Out.GetData() + static_cast<SIZE_T>(y) * DstW;
+			for (int32 x = 0; x < DstW; ++x)
+			{
+				const int32 SrcX = FMath::Clamp(static_cast<int32>((x + 0.5) * ScaleX), 0, SrcW - 1);
+				DstRow[x] = SrcRow[SrcX];
+			}
+		}
+		return Out;
+	}
+
+	bool WriteEXRPixels(const FString& FilePath, TArray64<FLinearColor> Pixels, int32 Width, int32 Height)
 	{
 		IImageWriteQueueModule* ImageWriteQueueModule = FModuleManager::Get().GetModulePtr<IImageWriteQueueModule>("ImageWriteQueue");
 		if (!ImageWriteQueueModule)
@@ -64,45 +97,15 @@ namespace CameraCaptureUtils
 			return false;
 		}
 
-		if (RgbData.Num() != Width * Height || DmvData.Num() != Width * Height)
+		if (Width <= 0 || Height <= 0 || Pixels.Num() != static_cast<int64>(Width) * Height)
 		{
-			UE_LOG(LogTemp, Error, TEXT("Image data size mismatch. Expected %dx%d, got RGB:%d DMV:%d"),
-				Width, Height, RgbData.Num(), DmvData.Num());
+			UE_LOG(LogTemp, Error, TEXT("WriteEXRPixels: %lld pixels does not match %dx%d"), Pixels.Num(), Width, Height);
 			return false;
 		}
 
 		TUniquePtr<TImagePixelData<FLinearColor>> PixelData = MakeUnique<TImagePixelData<FLinearColor>>(
 			FIntPoint(Width, Height),
-			TArray64<FLinearColor>());
-
-		PixelData->Pixels.Reserve(Width * Height);
-
-		if (bIncludeDepth)
-		{
-			// RGB + Depth format: RGB from RgbData, depth from DmvData.R
-			for (int32 i = 0; i < Width * Height; ++i)
-			{
-				FLinearColor Pixel;
-				Pixel.R = RgbData[i].R;
-				Pixel.G = RgbData[i].G;
-				Pixel.B = RgbData[i].B;
-				Pixel.A = DmvData[i].R; // Depth in alpha channel
-				PixelData->Pixels.Add(Pixel);
-			}
-		}
-		else
-		{
-			// Motion vector format: X from DmvData.G, Y from DmvData.B
-			for (int32 i = 0; i < Width * Height; ++i)
-			{
-				FLinearColor Pixel;
-				Pixel.R = DmvData[i].G; // Motion X
-				Pixel.G = DmvData[i].B; // Motion Y
-				Pixel.B = 0.0f;
-				Pixel.A = 0.0f;
-				PixelData->Pixels.Add(Pixel);
-			}
-		}
+			MoveTemp(Pixels));
 
 		TUniquePtr<FImageWriteTask> ImageTask = MakeUnique<FImageWriteTask>();
 		ImageTask->PixelData = MoveTemp(PixelData);
@@ -111,9 +114,59 @@ namespace CameraCaptureUtils
 		ImageTask->CompressionQuality = (int32)EImageCompressionQuality::Default;
 		ImageTask->bOverwriteFile = true;
 
-		TFuture<bool> CompletionFuture = ImageWriteQueueModule->GetWriteQueue().Enqueue(MoveTemp(ImageTask));
-
+		ImageWriteQueueModule->GetWriteQueue().Enqueue(MoveTemp(ImageTask));
 		return true;
+	}
+
+	bool WriteEXRFile(const FString& FilePath,
+		const TArray<FLinearColor>&	 RgbData,
+		const TArray<FLinearColor>&	 DmvData,
+		int32						 Width,
+		int32						 Height,
+		bool						 bIncludeDepth)
+	{
+		if (Width <= 0 || Height <= 0)
+		{
+			UE_LOG(LogTemp, Error, TEXT("WriteEXRFile: invalid dimensions %dx%d"), Width, Height);
+			return false;
+		}
+
+		const int32 NumPixels = Width * Height;
+
+		// Both planes must already be on this grid. Callers with depth at a
+		// different resolution resample first (ResampleDepthNearest) or write the
+		// depth plane as its own file -- this function cannot know which was meant.
+		if (RgbData.Num() != NumPixels || DmvData.Num() != NumPixels)
+		{
+			UE_LOG(LogTemp, Error, TEXT("Image data size mismatch. Expected %dx%d, got RGB:%d DMV:%d"),
+				Width, Height, RgbData.Num(), DmvData.Num());
+			return false;
+		}
+
+		TArray64<FLinearColor> Pixels;
+		Pixels.SetNumUninitialized(NumPixels);
+		FLinearColor* RESTRICT		 Out = Pixels.GetData();
+		const FLinearColor* RESTRICT Rgb = RgbData.GetData();
+		const FLinearColor* RESTRICT Dmv = DmvData.GetData();
+
+		if (bIncludeDepth)
+		{
+			// RGB + Depth: colour from RgbData, depth from DmvData.R into alpha.
+			for (int32 i = 0; i < NumPixels; ++i)
+			{
+				Out[i] = FLinearColor(Rgb[i].R, Rgb[i].G, Rgb[i].B, Dmv[i].R);
+			}
+		}
+		else
+		{
+			// Motion vectors: X from DmvData.G, Y from DmvData.B.
+			for (int32 i = 0; i < NumPixels; ++i)
+			{
+				Out[i] = FLinearColor(Dmv[i].G, Dmv[i].B, 0.0f, 0.0f);
+			}
+		}
+
+		return WriteEXRPixels(FilePath, MoveTemp(Pixels), Width, Height);
 	}
 
 	bool WriteMetadataFile(const FString& FilePath,

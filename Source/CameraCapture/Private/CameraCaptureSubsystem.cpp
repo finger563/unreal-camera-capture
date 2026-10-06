@@ -533,7 +533,7 @@ void UCameraCaptureSubsystem::KickAllCaptures()
 			UTextureRenderTarget2D* RgbRT = Camera->TextureTarget;
 			Pending.RgbReadback.Width = RgbRT->SizeX;
 			Pending.RgbReadback.Height = RgbRT->SizeY;
-			Pending.RgbReadback.bIsFloat = (RgbRT->RenderTargetFormat == RTF_RGBA32f || RgbRT->RenderTargetFormat == RTF_RGBA16f);
+			Pending.RgbReadback.PixelFormat = GetPixelFormatFromRenderTargetFormat(RgbRT->RenderTargetFormat);
 			Pending.Metadata.Width = RgbRT->SizeX;
 			Pending.Metadata.Height = RgbRT->SizeY;
 
@@ -555,7 +555,16 @@ void UCameraCaptureSubsystem::KickAllCaptures()
 				{
 					Pending.DmvReadback.Width = DmvRT->SizeX;
 					Pending.DmvReadback.Height = DmvRT->SizeY;
-					Pending.DmvReadback.bIsFloat = true; // DMV is always RGBA32f
+					// Read the format off the target rather than asserting it. The
+					// DMV target this subsystem creates is RGBA32f, but a camera
+					// can arrive with one somebody else made.
+					Pending.DmvReadback.PixelFormat = GetPixelFormatFromRenderTargetFormat(DmvRT->RenderTargetFormat);
+
+					// Depth keeps its own dimensions all the way through. With
+					// separate depth intrinsics these differ from the colour ones,
+					// and everything downstream needs to know which is which.
+					Pending.Metadata.DepthWidth = DmvRT->SizeX;
+					Pending.Metadata.DepthHeight = DmvRT->SizeY;
 
 					EnqueueAsyncReadback(DmvRT, Pending.DmvReadback.Readback);
 					Pending.bHasDmv = true;
@@ -686,6 +695,19 @@ void UCameraCaptureSubsystem::HarvestReadyReadbacks()
 
 void UCameraCaptureSubsystem::HarvestRgbReadback(FPendingReadback& Readback, FCaptureData& OutData)
 {
+	// A readback is raw GPU memory with no self-describing format, so refuse to
+	// interpret one we do not recognise rather than guessing a stride and walking
+	// off the end of the staging buffer.
+	const EPixelFormat Format = Readback.PixelFormat;
+	if (Format != PF_B8G8R8A8 && Format != PF_R8G8B8A8 && Format != PF_A32B32G32R32F && Format != PF_FloatRGBA)
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("[CameraCaptureSubsystem] RGB readback has unsupported pixel format %d; skipping rather than mis-reading it. ")
+				TEXT("Use an RGBA8, RGBA16f or RGBA32f render target."),
+			static_cast<int32>(Format));
+		return;
+	}
+
 	int32 RowPitchInPixels = 0;
 	int32 BufferHeight = 0;
 	void* SrcData = Readback.Readback->Lock(RowPitchInPixels, &BufferHeight);
@@ -699,38 +721,74 @@ void UCameraCaptureSubsystem::HarvestRgbReadback(FPendingReadback& Readback, FCa
 
 	const int32 Width = Readback.Width;
 	const int32 Height = Readback.Height;
-	OutData.ImageData.SetNumUninitialized(Width * Height);
 
-	if (Readback.bIsFloat)
+	// The staging buffer is only guaranteed to hold what the GPU actually copied.
+	// If it is shorter than the rows we are about to walk, stop: this is the last
+	// place we can catch a size disagreement before it becomes a wild read.
+	if (Width <= 0 || Height <= 0 || RowPitchInPixels < Width || (BufferHeight > 0 && BufferHeight < Height))
 	{
-		// Source is FLinearColor (RGBA32f) — convert to FColor
-		const FLinearColor* SrcRow = static_cast<const FLinearColor*>(SrcData);
-		for (int32 y = 0; y < Height; y++)
-		{
-			for (int32 x = 0; x < Width; x++)
-			{
-				OutData.ImageData[y * Width + x] = SrcRow[x].ToFColor(true);
-			}
-			SrcRow += RowPitchInPixels;
-		}
+		UE_LOG(LogTemp, Error,
+			TEXT("[CameraCaptureSubsystem] RGB readback geometry does not hold the expected image: %dx%d requested, pitch %d, buffer height %d"),
+			Width, Height, RowPitchInPixels, BufferHeight);
+		Readback.Readback->Unlock();
+		return;
 	}
-	else
+
+	OutData.ImageData.SetNumUninitialized(Width * Height);
+	FColor* RESTRICT Dst = OutData.ImageData.GetData();
+
+	switch (Format)
 	{
-		// Source is BGRA8 (FColor) — fast memcpy path
-		const FColor* SrcRow = static_cast<const FColor*>(SrcData);
-		if (Width == RowPitchInPixels)
+		case PF_A32B32G32R32F:
 		{
-			FMemory::Memcpy(OutData.ImageData.GetData(), SrcData, Width * Height * sizeof(FColor));
-		}
-		else
-		{
-			FColor* Dst = OutData.ImageData.GetData();
+			// 32-bit float per channel: 16 bytes/pixel.
+			const FLinearColor* SrcRow = static_cast<const FLinearColor*>(SrcData);
 			for (int32 y = 0; y < Height; y++)
 			{
-				FMemory::Memcpy(Dst, SrcRow, Width * sizeof(FColor));
+				for (int32 x = 0; x < Width; x++)
+				{
+					Dst[x] = SrcRow[x].ToFColor(true);
+				}
 				Dst += Width;
 				SrcRow += RowPitchInPixels;
 			}
+			break;
+		}
+		case PF_FloatRGBA:
+		{
+			// 16-bit half per channel: 8 bytes/pixel. Reading this as FLinearColor
+			// is the bug this switch exists to prevent -- it covered twice the
+			// bytes the buffer held.
+			const FFloat16Color* SrcRow = static_cast<const FFloat16Color*>(SrcData);
+			for (int32 y = 0; y < Height; y++)
+			{
+				for (int32 x = 0; x < Width; x++)
+				{
+					Dst[x] = FLinearColor(SrcRow[x]).ToFColor(true);
+				}
+				Dst += Width;
+				SrcRow += RowPitchInPixels;
+			}
+			break;
+		}
+		default:
+		{
+			// BGRA8 / RGBA8: 4 bytes/pixel, already FColor-shaped.
+			const FColor* SrcRow = static_cast<const FColor*>(SrcData);
+			if (Width == RowPitchInPixels)
+			{
+				FMemory::Memcpy(Dst, SrcRow, static_cast<SIZE_T>(Width) * Height * sizeof(FColor));
+			}
+			else
+			{
+				for (int32 y = 0; y < Height; y++)
+				{
+					FMemory::Memcpy(Dst, SrcRow, Width * sizeof(FColor));
+					Dst += Width;
+					SrcRow += RowPitchInPixels;
+				}
+			}
+			break;
 		}
 	}
 
@@ -739,6 +797,19 @@ void UCameraCaptureSubsystem::HarvestRgbReadback(FPendingReadback& Readback, FCa
 
 void UCameraCaptureSubsystem::HarvestDmvReadback(FPendingReadback& Readback, FCaptureData& OutData)
 {
+	// Depth carries real distances, so a half-float target would quietly cap
+	// precision; but refusing outright would break a working setup, so take both
+	// float formats and reject only what we cannot read at all.
+	const EPixelFormat Format = Readback.PixelFormat;
+	if (Format != PF_A32B32G32R32F && Format != PF_FloatRGBA)
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("[CameraCaptureSubsystem] DMV readback has pixel format %d, which cannot carry float depth; skipping. ")
+				TEXT("Use an RGBA32f render target for depth/motion."),
+			static_cast<int32>(Format));
+		return;
+	}
+
 	int32 RowPitchInPixels = 0;
 	int32 BufferHeight = 0;
 	void* SrcData = Readback.Readback->Lock(RowPitchInPixels, &BufferHeight);
@@ -752,23 +823,61 @@ void UCameraCaptureSubsystem::HarvestDmvReadback(FPendingReadback& Readback, FCa
 
 	const int32 Width = Readback.Width;
 	const int32 Height = Readback.Height;
-	const int32 NumPixels = Width * Height;
 
+	if (Width <= 0 || Height <= 0 || RowPitchInPixels < Width || (BufferHeight > 0 && BufferHeight < Height))
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("[CameraCaptureSubsystem] DMV readback geometry does not hold the expected image: %dx%d requested, pitch %d, buffer height %d"),
+			Width, Height, RowPitchInPixels, BufferHeight);
+		Readback.Readback->Unlock();
+		return;
+	}
+
+	const int32 NumPixels = Width * Height;
 	OutData.DepthData.SetNumUninitialized(NumPixels);
 	OutData.MotionVectorData.SetNumUninitialized(NumPixels);
 
-	// DMV render target is RGBA32f: R=Depth, G=MotionX, B=MotionY, A=1
-	const FLinearColor* SrcRow = static_cast<const FLinearColor*>(SrcData);
-	for (int32 y = 0; y < Height; y++)
+	// These are the dimensions the depth arrays are actually in. Set them here as
+	// well as at kick time so a harvest is self-consistent even if the target was
+	// swapped underneath us between kick and resolve.
+	OutData.DepthWidth = Width;
+	OutData.DepthHeight = Height;
+
+	float* RESTRICT		DepthDst = OutData.DepthData.GetData();
+	FVector2D* RESTRICT MotionDst = OutData.MotionVectorData.GetData();
+
+	// DMV layout: R=Depth, G=MotionX, B=MotionY, A=1
+	if (Format == PF_A32B32G32R32F)
 	{
-		const int32 RowStart = y * Width;
-		for (int32 x = 0; x < Width; x++)
+		const FLinearColor* SrcRow = static_cast<const FLinearColor*>(SrcData);
+		for (int32 y = 0; y < Height; y++)
 		{
-			const FLinearColor& Pixel = SrcRow[x];
-			OutData.DepthData[RowStart + x] = Pixel.R;
-			OutData.MotionVectorData[RowStart + x] = FVector2D(Pixel.G, Pixel.B);
+			for (int32 x = 0; x < Width; x++)
+			{
+				const FLinearColor& Pixel = SrcRow[x];
+				DepthDst[x] = Pixel.R;
+				MotionDst[x] = FVector2D(Pixel.G, Pixel.B);
+			}
+			DepthDst += Width;
+			MotionDst += Width;
+			SrcRow += RowPitchInPixels;
 		}
-		SrcRow += RowPitchInPixels;
+	}
+	else
+	{
+		const FFloat16Color* SrcRow = static_cast<const FFloat16Color*>(SrcData);
+		for (int32 y = 0; y < Height; y++)
+		{
+			for (int32 x = 0; x < Width; x++)
+			{
+				const FFloat16Color& Pixel = SrcRow[x];
+				DepthDst[x] = Pixel.R.GetFloat();
+				MotionDst[x] = FVector2D(Pixel.G.GetFloat(), Pixel.B.GetFloat());
+			}
+			DepthDst += Width;
+			MotionDst += Width;
+			SrcRow += RowPitchInPixels;
+		}
 	}
 
 	Readback.Readback->Unlock();
@@ -829,14 +938,33 @@ FCaptureData UCameraCaptureSubsystem::BuildCaptureMetadata(UIntrinsicSceneCaptur
 
 void UCameraCaptureSubsystem::EnsureCameraRenderTarget(UIntrinsicSceneCaptureComponent2D* Camera)
 {
-	if (Camera->TextureTarget)
-	{
-		return;
-	}
-
 	FCameraIntrinsics Intrinsics = Camera->GetActiveIntrinsics();
 	int32			  Width = Intrinsics.ImageWidth;
 	int32			  Height = Intrinsics.ImageHeight;
+
+	if (Width < 1 || Height < 1)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Camera %s has invalid intrinsic dimensions %dx%d; leaving its render target alone"),
+			*Camera->GetName(), Width, Height);
+		return;
+	}
+
+	if (Camera->TextureTarget)
+	{
+		// An existing target is kept, but not blindly: this used to return as soon
+		// as one existed, so changing the intrinsics at runtime left the target at
+		// its old size while the metadata reported the new one. The image then
+		// failed its own pixel-count check downstream and was written as black.
+		UTextureRenderTarget2D* Existing = Camera->TextureTarget;
+		if (Existing->SizeX != Width || Existing->SizeY != Height)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Resizing render target for %s from %dx%d to %dx%d to match its intrinsics"),
+				*Camera->GetName(), Existing->SizeX, Existing->SizeY, Width, Height);
+			Existing->ResizeTarget(Width, Height);
+			Existing->UpdateResourceImmediate(true);
+		}
+		return;
+	}
 
 	UTextureRenderTarget2D* NewRenderTarget = NewObject<UTextureRenderTarget2D>(Camera);
 	NewRenderTarget->RenderTargetFormat = RTF_RGBA8; // RGB only needs 8-bit
@@ -897,7 +1025,14 @@ bool UCameraCaptureSubsystem::WriteEXRFile_Static(const FString& FilePath, const
 		return false;
 	}
 
-	int32 NumPixels = Data.Width * Data.Height;
+	const int32 NumPixels = Data.Width * Data.Height;
+
+	// Depth and motion are in their own resolution when the camera has separate
+	// depth intrinsics. Older FCaptureData (and any built by hand) leaves the
+	// depth dimensions at zero, which means "same as colour".
+	const int32 DepthWidth = Data.DepthWidth > 0 ? Data.DepthWidth : Data.Width;
+	const int32 DepthHeight = Data.DepthHeight > 0 ? Data.DepthHeight : Data.Height;
+	const int32 DepthPixels = DepthWidth * DepthHeight;
 
 	if (Data.ImageData.Num() == 0 && Data.DepthData.Num() == 0 && Data.MotionVectorData.Num() == 0)
 	{
@@ -905,52 +1040,115 @@ bool UCameraCaptureSubsystem::WriteEXRFile_Static(const FString& FilePath, const
 		return false;
 	}
 
-	// Convert FCaptureData format to TArray<FLinearColor> format expected by utility functions
-	TArray<FLinearColor> RgbData;
-	TArray<FLinearColor> DmvData;
-	RgbData.SetNum(NumPixels);
-	DmvData.SetNum(NumPixels);
+	// Each plane is validated against its OWN geometry. This used to compare
+	// depth against the colour pixel count, so a camera with separate depth
+	// intrinsics failed the check every frame and wrote depth as all zeros --
+	// the feature looked like it worked and silently produced nothing.
+	const bool bHaveRgb = bCaptureRGB && Data.ImageData.Num() == NumPixels;
+	const bool bHaveDepth = bCaptureDepth && Data.DepthData.Num() == DepthPixels;
+	const bool bHaveMotion = bCaptureMotionVectors && Data.MotionVectorData.Num() == DepthPixels;
 
-	// Convert RGB from FColor to FLinearColor
-	if (bCaptureRGB && Data.ImageData.Num() == NumPixels)
+	if (bCaptureRGB && !bHaveRgb && Data.ImageData.Num() > 0)
 	{
-		for (int32 i = 0; i < NumPixels; i++)
-		{
-			RgbData[i] = FLinearColor(Data.ImageData[i]);
-		}
+		UE_LOG(LogTemp, Warning, TEXT("[CameraCaptureSubsystem] RGB plane is %d values, expected %dx%d; writing black"),
+			Data.ImageData.Num(), Data.Width, Data.Height);
 	}
-	else
+	if (bCaptureDepth && !bHaveDepth && Data.DepthData.Num() > 0)
 	{
-		for (int32 i = 0; i < NumPixels; i++)
-		{
-			RgbData[i] = FLinearColor::Black;
-		}
+		UE_LOG(LogTemp, Warning, TEXT("[CameraCaptureSubsystem] Depth plane is %d values, expected %dx%d; writing zero depth"),
+			Data.DepthData.Num(), DepthWidth, DepthHeight);
 	}
 
-	// Prepare DMV data: Depth in R, Motion X in G, Motion Y in B
+	// Depth goes into the combined file's alpha channel, which has to be on the
+	// colour grid. Resample when the two differ -- nearest neighbour, so the
+	// alpha channel only ever holds distances the scene really had.
+	TArray<float> DepthOnColourGrid;
+	if (bHaveDepth)
+	{
+		DepthOnColourGrid = CameraCaptureUtils::ResampleDepthNearest(
+			Data.DepthData, DepthWidth, DepthHeight, Data.Width, Data.Height);
+		if (DepthOnColourGrid.Num() != NumPixels)
+		{
+			UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Could not resample depth %dx%d onto colour %dx%d"),
+				DepthWidth, DepthHeight, Data.Width, Data.Height);
+			DepthOnColourGrid.Reset();
+		}
+	}
+	const bool bDepthInAlpha = DepthOnColourGrid.Num() == NumPixels;
+
+	// One pass, one buffer. The previous version built two full FLinearColor
+	// arrays here and WriteEXRFile built a third, so every frame allocated and
+	// filled 48 bytes per pixel to emit 16.
+	TArray64<FLinearColor> Pixels;
+	Pixels.SetNumUninitialized(NumPixels);
+	FLinearColor* RESTRICT Out = Pixels.GetData();
+
+	const FColor* RESTRICT SrcRgb = bHaveRgb ? Data.ImageData.GetData() : nullptr;
+	const float* RESTRICT  SrcDepth = bDepthInAlpha ? DepthOnColourGrid.GetData() : nullptr;
+
 	for (int32 i = 0; i < NumPixels; i++)
 	{
-		float Depth = (bCaptureDepth && Data.DepthData.Num() == NumPixels) ? Data.DepthData[i] : 0.0f;
-		float MotionX = (bCaptureMotionVectors && Data.MotionVectorData.Num() == NumPixels) ? Data.MotionVectorData[i].X : 0.0f;
-		float MotionY = (bCaptureMotionVectors && Data.MotionVectorData.Num() == NumPixels) ? Data.MotionVectorData[i].Y : 0.0f;
-
-		DmvData[i] = FLinearColor(Depth, MotionX, MotionY, 0.0f);
+		if (SrcRgb)
+		{
+			const FColor& C = SrcRgb[i];
+			// FLinearColor(FColor) applies sRGB decode; the capture path already
+			// encoded to sRGB on the way out of the readback, so this is the
+			// inverse and matches what the old code did via the same constructor.
+			Out[i] = FLinearColor(C);
+		}
+		else
+		{
+			Out[i] = FLinearColor::Black;
+		}
+		Out[i].A = SrcDepth ? SrcDepth[i] : 0.0f;
 	}
 
-	// Use shared utility to write RGB+Depth EXR
-	if (!CameraCaptureUtils::WriteEXRFile(FilePath, RgbData, DmvData, Data.Width, Data.Height, true))
+	if (!CameraCaptureUtils::WriteEXRPixels(FilePath, MoveTemp(Pixels), Data.Width, Data.Height))
 	{
 		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Failed to write RGB+Depth EXR: %s"), *FilePath);
 		return false;
 	}
 
-	// Write motion vectors to separate file if we have them
-	if (bCaptureMotionVectors && Data.MotionVectorData.Num() == NumPixels)
+	// Motion vectors go out at their own resolution, which is the depth grid --
+	// not the colour one. Writing them on the colour grid was the same bug in the
+	// other direction: it either refused to write or wrote resampled vectors
+	// whose magnitudes no longer matched the pixels they were measured in.
+	if (bHaveMotion)
 	{
-		FString MotionPath = FilePath.Replace(TEXT(".exr"), TEXT("_motion.exr"));
-		if (!CameraCaptureUtils::WriteEXRFile(MotionPath, RgbData, DmvData, Data.Width, Data.Height, false))
+		TArray64<FLinearColor> MotionPixels;
+		MotionPixels.SetNumUninitialized(DepthPixels);
+		FLinearColor* RESTRICT	  MotionOut = MotionPixels.GetData();
+		const FVector2D* RESTRICT SrcMotion = Data.MotionVectorData.GetData();
+		for (int32 i = 0; i < DepthPixels; i++)
+		{
+			MotionOut[i] = FLinearColor(static_cast<float>(SrcMotion[i].X), static_cast<float>(SrcMotion[i].Y), 0.0f, 0.0f);
+		}
+
+		const FString MotionPath = FilePath.Replace(TEXT(".exr"), TEXT("_motion.exr"));
+		if (!CameraCaptureUtils::WriteEXRPixels(MotionPath, MoveTemp(MotionPixels), DepthWidth, DepthHeight))
 		{
 			UE_LOG(LogTemp, Warning, TEXT("[CameraCaptureSubsystem] Failed to write motion EXR: %s"), *MotionPath);
+		}
+	}
+
+	// When depth is not on the colour grid, the alpha channel above is a
+	// resampled copy. Emit the measured depth at its own resolution too, so the
+	// native data is never only available through a resample.
+	if (bHaveDepth && (DepthWidth != Data.Width || DepthHeight != Data.Height))
+	{
+		TArray64<FLinearColor> DepthPixelsOut;
+		DepthPixelsOut.SetNumUninitialized(DepthPixels);
+		FLinearColor* RESTRICT DepthOut = DepthPixelsOut.GetData();
+		const float* RESTRICT  SrcNative = Data.DepthData.GetData();
+		for (int32 i = 0; i < DepthPixels; i++)
+		{
+			DepthOut[i] = FLinearColor(SrcNative[i], 0.0f, 0.0f, SrcNative[i]);
+		}
+
+		const FString DepthPath = FilePath.Replace(TEXT(".exr"), TEXT("_depth.exr"));
+		if (!CameraCaptureUtils::WriteEXRPixels(DepthPath, MoveTemp(DepthPixelsOut), DepthWidth, DepthHeight))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[CameraCaptureSubsystem] Failed to write native-resolution depth EXR: %s"), *DepthPath);
 		}
 	}
 
@@ -982,6 +1180,21 @@ bool UCameraCaptureSubsystem::WriteMetadataFile_Static(const FString& FilePath, 
 	IntrinsicsJson->SetNumberField(TEXT("image_height"), Data.Intrinsics.ImageHeight);
 	IntrinsicsJson->SetBoolField(TEXT("maintain_y_axis"), Data.Intrinsics.bMaintainYAxis);
 	JsonObject->SetObjectField(TEXT("intrinsics"), IntrinsicsJson);
+
+	// The grid each plane is actually in. A reader cannot infer the depth size
+	// from the intrinsics above, because those are the colour intrinsics, and a
+	// camera with separate depth calibration captures depth at its own size.
+	JsonObject->SetNumberField(TEXT("color_width"), Data.Width);
+	JsonObject->SetNumberField(TEXT("color_height"), Data.Height);
+	if (Data.DepthWidth > 0 && Data.DepthHeight > 0)
+	{
+		JsonObject->SetNumberField(TEXT("depth_width"), Data.DepthWidth);
+		JsonObject->SetNumberField(TEXT("depth_height"), Data.DepthHeight);
+		// Tells a reader whether the alpha channel of frame_N.exr is measured
+		// depth or a nearest-neighbour resample of it, and that the measured
+		// values are in frame_N_depth.exr when it is the latter.
+		JsonObject->SetBoolField(TEXT("depth_resampled_into_alpha"), Data.HasMismatchedDepthResolution());
+	}
 
 	JsonObject->SetStringField(TEXT("actor_path"), Data.ActorPath);
 	JsonObject->SetStringField(TEXT("level_name"), Data.LevelName);
