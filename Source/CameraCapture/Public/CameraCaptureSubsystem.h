@@ -361,7 +361,8 @@ protected:
 	void HarvestReadyReadbacks();
 
 	/** Enqueue an async GPU readback for a render target */
-	void EnqueueAsyncReadback(UTextureRenderTarget2D* RenderTarget, TSharedPtr<FRHIGPUTextureReadback>& OutReadback);
+	void EnqueueAsyncReadback(UTextureRenderTarget2D* RenderTarget, TSharedPtr<FRHIGPUTextureReadback>& OutReadback,
+		TSharedPtr<FThreadSafeBool>& OutCopyIssued);
 
 	/** Build FCaptureData metadata (transform, intrinsics, etc.) without pixel data */
 	FCaptureData BuildCaptureMetadata(UIntrinsicSceneCaptureComponent2D* Camera);
@@ -414,6 +415,28 @@ protected:
 		/** Single-capture mode: alpha carries scene depth in cm, so the same
 		 *  readback supplies both planes and there is no second one. */
 		bool bDepthInAlpha = false;
+
+		/**
+		 * Set by the render thread once EnqueueCopy has actually been issued.
+		 *
+		 * Readbacks are pooled, and a pooled one arrives with its fence still
+		 * SIGNALLED from its previous use. IsReady() therefore answered true the
+		 * moment it was handed out -- before the new copy had been issued -- so
+		 * the harvest read the staging buffer from an earlier frame and kept
+		 * reading it. Depth and motion froze on the first frame they ever
+		 * captured while colour carried on updating.
+		 *
+		 * EnqueueCopy clears the fence as its first act, and that happens on the
+		 * render thread, so once this is true the fence describes the new copy
+		 * and IsReady() means what it says.
+		 */
+		TSharedPtr<FThreadSafeBool> CopyIssued;
+
+		/** True when the copy has been issued AND has completed. */
+		bool IsReadyForHarvest() const
+		{
+			return Readback.IsValid() && CopyIssued.IsValid() && *CopyIssued && Readback->IsReady();
+		}
 	};
 
 	/** All pending state for a single camera in a single frame */

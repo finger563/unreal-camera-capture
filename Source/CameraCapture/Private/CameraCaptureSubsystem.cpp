@@ -576,7 +576,7 @@ void UCameraCaptureSubsystem::KickAllCaptures()
 			Pending.Metadata.Width = RgbRT->SizeX;
 			Pending.Metadata.Height = RgbRT->SizeY;
 
-			EnqueueAsyncReadback(RgbRT, Pending.RgbReadback.Readback);
+			EnqueueAsyncReadback(RgbRT, Pending.RgbReadback.Readback, Pending.RgbReadback.CopyIssued);
 			Pending.bHasRgb = true;
 		}
 
@@ -607,7 +607,7 @@ void UCameraCaptureSubsystem::KickAllCaptures()
 					Pending.Metadata.DepthWidth = DmvRT->SizeX;
 					Pending.Metadata.DepthHeight = DmvRT->SizeY;
 
-					EnqueueAsyncReadback(DmvRT, Pending.DmvReadback.Readback);
+					EnqueueAsyncReadback(DmvRT, Pending.DmvReadback.Readback, Pending.DmvReadback.CopyIssued);
 					Pending.bHasDmv = true;
 				}
 			}
@@ -707,7 +707,8 @@ void UCameraCaptureSubsystem::ReleaseReadback(TSharedPtr<FRHIGPUTextureReadback>
 	}
 }
 
-void UCameraCaptureSubsystem::EnqueueAsyncReadback(UTextureRenderTarget2D* RenderTarget, TSharedPtr<FRHIGPUTextureReadback>& OutReadback)
+void UCameraCaptureSubsystem::EnqueueAsyncReadback(UTextureRenderTarget2D* RenderTarget, TSharedPtr<FRHIGPUTextureReadback>& OutReadback,
+	TSharedPtr<FThreadSafeBool>& OutCopyIssued)
 {
 	if (!RenderTarget)
 	{
@@ -734,9 +735,15 @@ void UCameraCaptureSubsystem::EnqueueAsyncReadback(UTextureRenderTarget2D* Rende
 	TSharedPtr<FRHIGPUTextureReadback> Readback = OutReadback;
 	FTextureRenderTargetResource*	   ResourcePtr = RTResource;
 
+	// Fresh flag per enqueue: a pooled readback's fence is still signalled from
+	// its last use, so "is the copy done" cannot be asked until the copy has been
+	// issued. Without this the harvest read a previous frame's pixels.
+	OutCopyIssued = MakeShared<FThreadSafeBool>(false);
+	TSharedPtr<FThreadSafeBool> CopyIssued = OutCopyIssued;
+
 	ENQUEUE_RENDER_COMMAND(CameraCaptureEnqueueReadback)
 	(
-		[Readback, ResourcePtr](FRHICommandListImmediate& RHICmdList) {
+		[Readback, ResourcePtr, CopyIssued](FRHICommandListImmediate& RHICmdList) {
 			FRHITexture* Texture = ResourcePtr->GetRenderTargetTexture();
 			if (Texture)
 			{
@@ -744,6 +751,9 @@ void UCameraCaptureSubsystem::EnqueueAsyncReadback(UTextureRenderTarget2D* Rende
 				// (Renderer/Private/SceneViewState.cpp), rather than the
 				// two-argument convenience overload.
 				Readback->EnqueueCopy(RHICmdList, Texture, FIntVector(0, 0, 0), 0, FIntVector(0, 0, 0));
+				// EnqueueCopy cleared the fence, so from here IsReady() refers to
+				// THIS copy rather than whatever the pooled object did last.
+				*CopyIssued = true;
 			}
 		});
 }
@@ -765,8 +775,8 @@ void UCameraCaptureSubsystem::HarvestReadyReadbacks()
 		Pending.FramesWaiting++;
 
 		// Check if ALL readbacks for this camera are ready (non-blocking poll)
-		bool bRgbReady = !Pending.bHasRgb || !Pending.RgbReadback.Readback || Pending.RgbReadback.Readback->IsReady();
-		bool bDmvReady = !Pending.bHasDmv || !Pending.DmvReadback.Readback || Pending.DmvReadback.Readback->IsReady();
+		const bool bRgbReady = !Pending.bHasRgb || !Pending.RgbReadback.Readback || Pending.RgbReadback.IsReadyForHarvest();
+		const bool bDmvReady = !Pending.bHasDmv || !Pending.DmvReadback.Readback || Pending.DmvReadback.IsReadyForHarvest();
 
 		if (bRgbReady && bDmvReady)
 		{
