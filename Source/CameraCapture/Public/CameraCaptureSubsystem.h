@@ -196,12 +196,14 @@ enum class ERammsCaptureMode : uint8
 	 *
 	 * Roughly halves the per-camera cost. Three consequences worth knowing:
 	 * motion vectors are not produced at all; colour is linear scene colour
-	 * rather than the tone-mapped SCS_FinalColorHDR the other mode defaults to;
-	 * and because both planes come out of one render target they necessarily
-	 * share a resolution, so separate depth intrinsics are ignored.
+	 * rather than the tone-mapped image ColorCaptureSource selects for the other
+	 * mode (SCS_FinalColorLDR by default); and because both planes come out of
+	 * one render target they necessarily share a resolution, so separate depth
+	 * intrinsics are ignored.
 	 *
-	 * The depth is in centimetres, which is what FCaptureData has always
-	 * documented -- the DMV material emits a normalised 0..1 instead.
+	 * Depth is in centimetres, as FCaptureData documents. So is the other mode's:
+	 * the DMV material reads SceneDepth unscaled, and SceneDepth is already
+	 * centimetres. Both modes produce centimetres, measured differently.
 	 */
 	SingleCaptureColorDepth UMETA(DisplayName = "Single capture, colour + depth in alpha (1 render)")
 };
@@ -342,10 +344,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Camera Capture")
 	ERammsCaptureColorFormat GetColorFormat() const { return ColorFormat; }
 
-	/** How many renders each camera costs; see ERammsCaptureMode. Changing this
-	 *  while capturing takes effect on the next StartCapture. */
+	/** How many renders each camera costs; see ERammsCaptureMode. Safe to change
+	 *  at any time, including mid-capture: registered cameras are reconfigured
+	 *  for the new mode on the spot, since the two modes need different render
+	 *  target formats and only one of them needs a second camera. */
 	UFUNCTION(BlueprintCallable, Category = "Camera Capture")
-	void SetCaptureMode(ERammsCaptureMode Mode) { CaptureMode = Mode; }
+	void SetCaptureMode(ERammsCaptureMode Mode);
 
 	/** Which image the colour cameras capture. See ColorCaptureSource. */
 	UFUNCTION(BlueprintCallable, Category = "Camera Capture")
@@ -396,9 +400,11 @@ protected:
 	static bool WriteEXRFile_Static(const FString& FilePath, const FCaptureData& Data, bool bCaptureRGB, bool bCaptureDepth, bool bCaptureMotionVectors,
 		ERammsCaptureColorFormat Format = ERammsCaptureColorFormat::CombinedEXR);
 
-	/** Write metadata JSON file — called from background thread */
+	/** Write metadata JSON file — called from background thread.
+	 *  bCaptureDepth is needed because the file reports what was actually
+	 *  written, not what the geometry would allow. */
 	static bool WriteMetadataFile_Static(const FString& FilePath, const FCaptureData& Data,
-		ERammsCaptureColorFormat Format = ERammsCaptureColorFormat::CombinedEXR);
+		ERammsCaptureColorFormat Format = ERammsCaptureColorFormat::CombinedEXR, bool bCaptureDepth = true);
 
 	/** Generate unique camera ID, handling collisions */
 	FCameraIdentifier GenerateCameraID(UIntrinsicSceneCaptureComponent2D* Camera);
@@ -408,6 +414,17 @@ protected:
 
 	/** Set up depth+motion capture camera for a registered RGB camera */
 	void SetupDmvCamera(UIntrinsicSceneCaptureComponent2D* RgbCamera);
+
+	/**
+	 * Bring already-registered cameras in line with the current CaptureMode.
+	 *
+	 * The two modes are not interchangeable at the resource level: single
+	 * capture needs a float target so alpha can hold a distance and needs no
+	 * second camera, while the two-render mode needs the DMV camera that
+	 * produces depth and motion. Flipping the enum alone left cameras configured
+	 * for the mode they were registered under.
+	 */
+	void ReconfigureCamerasForCaptureMode();
 
 	/** Ensure camera has a render target assigned */
 	void EnsureCameraRenderTarget(UIntrinsicSceneCaptureComponent2D* Camera);

@@ -143,6 +143,20 @@ protected:
 	/** Captures whose GPU copies have not landed yet. */
 	TArray<FPendingFrame> PendingFrames;
 
+	/**
+	 * Frame index of the deferred capture armed on the previous CaptureData, or
+	 * INDEX_NONE if there is none waiting.
+	 *
+	 * CaptureSceneDeferred only MARKS a camera to render later in the frame, so
+	 * a readback enqueued in the same tick is copied off the target before the
+	 * requested capture has written to it. The readbacks for a frame are
+	 * therefore enqueued on the next call, by which point the render has run.
+	 */
+	int32 ArmedFrameIndex = INDEX_NONE;
+
+	/** Enqueue the GPU copies for the capture armed on the previous call. */
+	void EnqueueArmedReadbacks();
+
 	/** Give up on a readback after this many frames rather than holding its
 	 *  staging buffer forever. */
 	static constexpr int32 MaxReadbackWaitFrames = 10;

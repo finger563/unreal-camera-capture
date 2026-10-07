@@ -522,6 +522,14 @@ void UCaptureComponent::CaptureData()
 	if (!ShouldCaptureData)
 		return;
 
+	// Read back the capture armed LAST time, before arming another. The copies
+	// used to be enqueued in the same tick as CaptureSceneDeferred, which only
+	// marks a camera to render later in the frame -- so the copy ran ahead of the
+	// render it was meant to collect and returned whatever the target held
+	// before. The pre-readback code avoided this by reading on the next tick;
+	// this keeps that ordering while keeping the copies asynchronous.
+	EnqueueArmedReadbacks();
+
 	// Start deferred capture of the scene (RGB)
 	for (auto camera : RgbCameras)
 	{
@@ -537,14 +545,26 @@ void UCaptureComponent::CaptureData()
 	// GPU copy per camera per channel whether or not anyone wants the pixels.
 	if (!ShouldSaveData)
 	{
+		ArmedFrameIndex = INDEX_NONE;
 		return;
 	}
 
-	// Queue the copies now and collect them when the GPU is done. The previous
-	// version called ReadLinearColorPixels on the next tick, which ends in
+	ArmedFrameIndex = ImageIndex++;
+}
+
+void UCaptureComponent::EnqueueArmedReadbacks()
+{
+	if (ArmedFrameIndex == INDEX_NONE)
+	{
+		return;
+	}
+	const int32 FrameIndex = ArmedFrameIndex;
+	ArmedFrameIndex = INDEX_NONE;
+
+	// Queue the copies and collect them when the GPU is done. The previous
+	// version called ReadLinearColorPixels, which ends in
 	// FlushRenderingCommands() -- the game thread sat waiting for the GPU twice
 	// per camera, every capture.
-	const int32 FrameIndex = ImageIndex++;
 	for (int32 i = 0; i < RgbCameras.Num(); i++)
 	{
 		if (!RgbTextures.IsValidIndex(i) || !DmvTextures.IsValidIndex(i))

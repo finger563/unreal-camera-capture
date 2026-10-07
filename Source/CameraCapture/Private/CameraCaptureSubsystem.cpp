@@ -502,6 +502,71 @@ void UCameraCaptureSubsystem::SetDmvMaterial(UMaterial* Material)
 	}
 }
 
+void UCameraCaptureSubsystem::SetCaptureMode(ERammsCaptureMode Mode)
+{
+	if (Mode == CaptureMode)
+	{
+		return;
+	}
+	CaptureMode = Mode;
+	ReconfigureCamerasForCaptureMode();
+}
+
+void UCameraCaptureSubsystem::ReconfigureCamerasForCaptureMode()
+{
+	const bool bSingle = IsSingleCaptureMode();
+
+	for (int32 i = RegisteredCameras.Num() - 1; i >= 0; --i)
+	{
+		UIntrinsicSceneCaptureComponent2D* Camera = RegisteredCameras[i].Get();
+		if (!Camera)
+		{
+			continue;
+		}
+
+		if (bSingle)
+		{
+			// The second camera is the cost this mode exists to avoid, so it
+			// goes rather than sitting idle holding an RGBA32f target.
+			if (TWeakObjectPtr<USceneCaptureComponent2D>* DmvPtr = DmvCameras.Find(Camera))
+			{
+				if (USceneCaptureComponent2D* Dmv = DmvPtr->Get())
+				{
+					Dmv->DestroyComponent();
+				}
+			}
+			DmvCameras.Remove(Camera);
+			DmvRenderTargets.Remove(Camera);
+
+			// Alpha has to hold a distance in centimetres. An 8-bit target
+			// cannot, and keeping one would have produced depth quantised to
+			// 256 steps of the full range instead of an obvious failure.
+			UTextureRenderTarget2D* Existing = Camera->TextureTarget;
+			if (Existing && Existing->RenderTargetFormat != RTF_RGBA32f && Existing->RenderTargetFormat != RTF_RGBA16f)
+			{
+				UE_LOG(LogTemp, Log,
+					TEXT("[CameraCaptureSubsystem] %s has an 8-bit render target, which cannot carry depth in alpha; ")
+						TEXT("recreating it as RGBA32f for single-capture mode"),
+					*Camera->GetName());
+				Camera->TextureTarget = nullptr;
+			}
+		}
+		else if (!DmvCameras.Contains(Camera) && (bCaptureDepth || bCaptureMotionVectors) && DmvCaptureMaterialBase)
+		{
+			// Depth and motion come from the DMV camera in this mode, and a
+			// camera registered under single capture never got one.
+			SetupDmvCamera(Camera);
+		}
+
+		// Format, capture source and size are all settled here, and a null
+		// target left above is rebuilt.
+		EnsureCameraRenderTarget(Camera);
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Capture mode is now %s; reconfigured %d camera(s)"),
+		bSingle ? TEXT("SingleCaptureColorDepth") : TEXT("ColorPlusDepthMotion"), RegisteredCameras.Num());
+}
+
 void UCameraCaptureSubsystem::SetSerializationEnabled(bool bEnabled)
 {
 	bSerializationEnabled = bEnabled;
@@ -557,7 +622,12 @@ void UCameraCaptureSubsystem::KickAllCaptures()
 		Pending.Metadata = BuildCaptureMetadata(Camera);
 
 		// --- Kick RGB capture + enqueue async readback ---
-		if (bCaptureRGB && Camera->TextureTarget)
+		// In single-capture mode this one readback carries BOTH planes, so it is
+		// needed whenever either is wanted. Gated on bCaptureRGB alone, a
+		// depth-only configuration in that mode kicked no readback at all (the
+		// DMV branch below is skipped by design) and produced no frame.
+		const bool bColorReadbackCarriesDepth = IsSingleCaptureMode() && bCaptureDepth;
+		if ((bCaptureRGB || bColorReadbackCarriesDepth) && Camera->TextureTarget)
 		{
 			Camera->CaptureScene();
 
@@ -836,13 +906,18 @@ void UCameraCaptureSubsystem::HarvestReadyReadbacks()
 
 						Self->TotalFramesCaptured++;
 
+						// MOVED, not copied. ReleaseReadback only pools a readback
+						// it is the sole owner of, and passing the member by value
+						// left the member itself as a second owner -- so
+						// IsUnique() was false every time and the pool this
+						// branch exists for stayed permanently empty.
 						if (RgbRb.IsValid())
 						{
-							Self->ReleaseReadback(RgbRb->Readback);
+							Self->ReleaseReadback(MoveTemp(RgbRb->Readback));
 						}
 						if (DmvRb.IsValid())
 						{
-							Self->ReleaseReadback(DmvRb->Readback);
+							Self->ReleaseReadback(MoveTemp(DmvRb->Readback));
 						}
 					});
 				});
@@ -1255,7 +1330,7 @@ void UCameraCaptureSubsystem::SerializeCaptureData(TSharedRef<const FCaptureData
 
 			// Write metadata JSON
 			FString MetadataPath = FPaths::Combine(CameraPath, FString::Printf(TEXT("frame_%s.json"), *FrameNumberStr));
-			WriteMetadataFile_Static(MetadataPath, *Data, Format);
+			WriteMetadataFile_Static(MetadataPath, *Data, Format, bDepth);
 		});
 }
 
@@ -1306,8 +1381,12 @@ bool UCameraCaptureSubsystem::WriteEXRFile_Static(const FString& FilePath, const
 	// Depth goes into the combined file's alpha channel, which has to be on the
 	// colour grid. Resample when the two differ -- nearest neighbour, so the
 	// alpha channel only ever holds distances the scene really had.
+	// Only the combined layout needs this: SeparatePNGAndEXR writes depth at the
+	// resolution it was measured at, so resampling for it allocated and filled a
+	// full colour-resolution array per frame and then threw it away.
+	const bool	  bCombined = Format != ERammsCaptureColorFormat::SeparatePNGAndEXR;
 	TArray<float> DepthOnColourGrid;
-	if (bHaveDepth)
+	if (bHaveDepth && bCombined)
 	{
 		DepthOnColourGrid = CameraCaptureUtils::ResampleDepthNearest(
 			Data.DepthData, DepthWidth, DepthHeight, Data.Width, Data.Height);
@@ -1456,7 +1535,7 @@ bool UCameraCaptureSubsystem::WriteEXRFile_Static(const FString& FilePath, const
 }
 
 bool UCameraCaptureSubsystem::WriteMetadataFile_Static(const FString& FilePath, const FCaptureData& Data,
-	ERammsCaptureColorFormat Format)
+	ERammsCaptureColorFormat Format, bool bCaptureDepth)
 {
 	// Create JSON object
 	TSharedPtr<FJsonObject> JsonObject = MakeShared<FJsonObject>();
@@ -1487,6 +1566,11 @@ bool UCameraCaptureSubsystem::WriteMetadataFile_Static(const FString& FilePath, 
 	// camera with separate depth calibration captures depth at its own size.
 	JsonObject->SetNumberField(TEXT("color_width"), Data.Width);
 	JsonObject->SetNumberField(TEXT("color_height"), Data.Height);
+
+	// Which files this frame produced, so a reader does not have to guess
+	// whether colour is in the EXR's RGB channels or beside it as a PNG.
+	const bool bSeparate = Format == ERammsCaptureColorFormat::SeparatePNGAndEXR;
+
 	if (Data.DepthWidth > 0 && Data.DepthHeight > 0)
 	{
 		JsonObject->SetNumberField(TEXT("depth_width"), Data.DepthWidth);
@@ -1494,12 +1578,17 @@ bool UCameraCaptureSubsystem::WriteMetadataFile_Static(const FString& FilePath, 
 		// Tells a reader whether the alpha channel of frame_N.exr is measured
 		// depth or a nearest-neighbour resample of it, and that the measured
 		// values are in frame_N_depth.exr when it is the latter.
-		JsonObject->SetBoolField(TEXT("depth_resampled_into_alpha"), Data.HasMismatchedDepthResolution());
+		//
+		// Derived from what was WRITTEN, not from the geometry. Geometry alone
+		// claimed resampled alpha for the separate layout, which has no combined
+		// EXR to put it in, and for captures with depth switched off, whose alpha
+		// is zero -- the same conditions WriteEXRFile_Static uses to decide
+		// whether depth reaches alpha at all.
+		const int32 DepthPixels = Data.DepthWidth * Data.DepthHeight;
+		const bool	bDepthWritten = bCaptureDepth && Data.DepthData.Num() == DepthPixels;
+		JsonObject->SetBoolField(TEXT("depth_resampled_into_alpha"),
+			!bSeparate && bDepthWritten && Data.HasMismatchedDepthResolution());
 	}
-
-	// Which files this frame produced, so a reader does not have to guess
-	// whether colour is in the EXR's RGB channels or beside it as a PNG.
-	const bool bSeparate = Format == ERammsCaptureColorFormat::SeparatePNGAndEXR;
 	JsonObject->SetStringField(TEXT("color_format"), bSeparate ? TEXT("png") : TEXT("exr"));
 	JsonObject->SetStringField(TEXT("layout"), bSeparate ? TEXT("separate") : TEXT("combined"));
 
