@@ -1172,6 +1172,17 @@ void UCameraCaptureSubsystem::EnsureCameraRenderTarget(UIntrinsicSceneCaptureCom
 		return;
 	}
 
+	// Capture source first, before the early return below: a camera that arrived
+	// with its own render target still needs this, and that is exactly the camera
+	// somebody has configured by hand and will be looking at.
+	//
+	// Single capture takes colour and depth from one pass. Otherwise take the
+	// finished image: left alone the component sits at the engine's
+	// SCS_SceneColorHDR, which is pre-tonemap linear HDR squeezed into an 8-bit
+	// target -- see ColorCaptureSource.
+	Camera->CaptureSource = IsSingleCaptureMode() ? TEnumAsByte<ESceneCaptureSource>(SCS_SceneColorSceneDepth)
+												  : ColorCaptureSource;
+
 	if (Camera->TextureTarget)
 	{
 		// An existing target is kept, but not blindly: this used to return as soon
@@ -1205,12 +1216,6 @@ void UCameraCaptureSubsystem::EnsureCameraRenderTarget(UIntrinsicSceneCaptureCom
 	NewRenderTarget->UpdateResourceImmediate(true);
 
 	Camera->TextureTarget = NewRenderTarget;
-
-	if (IsSingleCaptureMode())
-	{
-		// The engine writes scene colour to RGB and scene depth to A in one pass.
-		Camera->CaptureSource = SCS_SceneColorSceneDepth;
-	}
 
 	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Created %s render target (%dx%d) for camera %s"),
 		IsSingleCaptureMode() ? TEXT("RGBA32f colour+depth") : TEXT("RGBA8"),

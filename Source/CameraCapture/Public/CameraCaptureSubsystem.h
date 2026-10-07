@@ -347,6 +347,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Camera Capture")
 	void SetCaptureMode(ERammsCaptureMode Mode) { CaptureMode = Mode; }
 
+	/** Which image the colour cameras capture. See ColorCaptureSource. */
+	UFUNCTION(BlueprintCallable, Category = "Camera Capture")
+	void SetColorCaptureSource(TEnumAsByte<ESceneCaptureSource> Source) { ColorCaptureSource = Source; }
+
+	UFUNCTION(BlueprintPure, Category = "Camera Capture")
+	TEnumAsByte<ESceneCaptureSource> GetColorCaptureSource() const { return ColorCaptureSource; }
+
 	UFUNCTION(BlueprintPure, Category = "Camera Capture")
 	ERammsCaptureMode GetCaptureMode() const { return CaptureMode; }
 
@@ -551,6 +558,25 @@ private:
 	 *  mode, which is the existing behaviour and the only one that can produce
 	 *  motion vectors. */
 	ERammsCaptureMode CaptureMode = ERammsCaptureMode::ColorPlusDepthMotion;
+
+	/**
+	 * Which image the colour cameras capture.
+	 *
+	 * Not the engine default. USceneCaptureComponent2D starts at
+	 * SCS_SceneColorHDR -- "SceneColor (HDR) in RGB, Inv Opacity in A" -- which
+	 * is the scene before tone mapping, before exposure and before any post
+	 * processing, with inverted opacity where alpha should be. Written into the
+	 * RGBA8 target this subsystem creates, everything above 1.0 clamps and the
+	 * rest lands in the wrong transfer function: lit opaque geometry comes out
+	 * visibly wrong while translucent surfaces, composited differently, come out
+	 * looking fine. That is a confusing failure to look at and it was the
+	 * default for every camera this subsystem drove.
+	 *
+	 * SCS_FinalColorLDR is the fully post-processed, tone-mapped, display-
+	 * referred image -- what the camera actually sees, and what belongs in an
+	 * 8-bit target.
+	 */
+	TEnumAsByte<ESceneCaptureSource> ColorCaptureSource = SCS_FinalColorLDR;
 
 	/** True when one render per camera supplies both planes. */
 	bool IsSingleCaptureMode() const { return CaptureMode == ERammsCaptureMode::SingleCaptureColorDepth; }
