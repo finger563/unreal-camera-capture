@@ -129,7 +129,68 @@ protected:
 
 	// Data capture functions
 	void CaptureData();
-	void SaveData();
+
+	/**
+	 * What a camera was, at the moment its capture was armed.
+	 *
+	 * Metadata has to describe the frame it is written beside. Read at write
+	 * time instead, it describes whenever the GPU happened to finish -- several
+	 * frames later, and in timer mode a whole timer period later -- so a moving
+	 * camera's pose no longer matched its own pixels.
+	 */
+	struct FArmedCameraState
+	{
+		FCameraIntrinsics Intrinsics;
+		FTransform		  Transform;
+		float			  Timestamp = 0.0f;
+		bool			  bValid = false;
+	};
+
+	/** One camera's capture waiting on the GPU. */
+	struct FPendingFrame
+	{
+		int32							   CameraIndex = INDEX_NONE;
+		int32							   FrameIndex = 0;
+		int32							   FramesWaiting = 0;
+		FArmedCameraState				   State;
+		CameraCaptureUtils::FAsyncReadback Rgb;
+		CameraCaptureUtils::FAsyncReadback Dmv;
+	};
+
+	/** Captures whose GPU copies have not landed yet. */
+	TArray<FPendingFrame> PendingFrames;
+
+	/**
+	 * Frame index of the deferred capture armed on the previous CaptureData, or
+	 * INDEX_NONE if there is none waiting.
+	 *
+	 * CaptureSceneDeferred only MARKS a camera to render later in the frame, so
+	 * a readback enqueued in the same tick is copied off the target before the
+	 * requested capture has written to it. The readbacks for a frame are
+	 * therefore enqueued on the next call, by which point the render has run.
+	 */
+	int32 ArmedFrameIndex = INDEX_NONE;
+
+	/** Each camera as it was when the armed frame was requested, indexed to
+	 *  match RgbCameras. */
+	TArray<FArmedCameraState> ArmedCameraStates;
+
+	/** Enqueue the GPU copies for the capture armed on the previous call. */
+	void EnqueueArmedReadbacks();
+
+	/** Give up on a readback after this many frames rather than holding its
+	 *  staging buffer forever. */
+	static constexpr int32 MaxReadbackWaitFrames = 10;
+
+	/** Poll PendingFrames and write out the ones that have arrived. */
+	void HarvestAndWriteReadyFrames();
+
+	/** Write one harvested frame to disk. */
+	void WriteFrame(int32 CameraIndex, int32 FrameIndex, const FArmedCameraState& State, const TArray<FLinearColor>& rgb_data, const TArray<FLinearColor>& dmv_data, int32 RgbW, int32 RgbH, int32 DmvW, int32 DmvH);
+
+	/** Output directories already created, so we do not stat the same path
+	 *  every frame. */
+	TSet<FString> DirectoriesEnsured;
 
 	// Timer for handling state update and rendering
 	FTimerHandle CaptureTimerHandle;
@@ -137,7 +198,6 @@ protected:
 	int	 ImageIndex = 0;
 	bool ShouldCaptureData = true;
 	bool ShouldSaveData = false;
-	bool DeferredCaptureReady = false;
 	bool HasInitializedFiles = false;
 
 	FString TransformFile;

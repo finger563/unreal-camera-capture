@@ -75,14 +75,9 @@ void UCaptureComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	// make sure to do deferred saving FIRST, to ensure data consistency if we
-	// capture every frame
-	if (DeferredCaptureReady)
-	{
-		SaveData();
-		// reset the state variable here
-		DeferredCaptureReady = false;
-	}
+	// Collect anything the GPU has finished first, so a frame captured earlier
+	// is written before this tick queues another one.
+	HarvestAndWriteReadyFrames();
 
 	// If the timer period is set to 0 (or less), we're capturing every frame, so
 	// we can want to capture in the TickComponent function. Otherwise it's called
@@ -295,6 +290,9 @@ void UCaptureComponent::StartCapturing()
 
 void UCaptureComponent::StopCapturing()
 {
+	// Collect the frame already armed before the gate closes. In timer mode
+	// CaptureData may not be called again for a long time, or at all.
+	EnqueueArmedReadbacks();
 	ShouldCaptureData = false;
 }
 
@@ -523,6 +521,18 @@ void UCaptureComponent::UpdateTransformFile()
 
 void UCaptureComponent::CaptureData()
 {
+	// Read back the capture armed LAST time FIRST, and before the gate below.
+	//
+	// Two reasons it runs here. The copies used to be enqueued in the same tick
+	// as CaptureSceneDeferred, which only marks a camera to render later in the
+	// frame, so the copy ran ahead of the render it was meant to collect and
+	// returned whatever the target held before. And behind the ShouldCaptureData
+	// return an armed frame was stranded: capture stopping left its last frame
+	// unread, and resuming later read the THEN-current target under the OLD
+	// frame index. A frame that was armed was really captured, so it is drained
+	// whether or not capture is still on.
+	EnqueueArmedReadbacks();
+
 	// if we're not capturing data, just return
 	if (!ShouldCaptureData)
 		return;
@@ -538,93 +548,259 @@ void UCaptureComponent::CaptureData()
 		camera->CaptureSceneDeferred();
 	}
 
-	DeferredCaptureReady = true;
-}
-
-void UCaptureComponent::SaveData()
-{
+	// Nothing is read back unless it is going to be written. Reading costs a
+	// GPU copy per camera per channel whether or not anyone wants the pixels.
 	if (!ShouldSaveData)
 	{
+		ArmedFrameIndex = INDEX_NONE;
+		ArmedCameraStates.Reset();
 		return;
 	}
 
-	for (int i = 0; i < RgbCameras.Num(); i++)
+	// Snapshot each camera NOW, beside the render it describes. By the time the
+	// pixels land the camera has moved on.
+	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+	ArmedCameraStates.SetNum(RgbCameras.Num());
+	for (int32 i = 0; i < RgbCameras.Num(); i++)
 	{
-		// get the cameras and their render textures
-		auto rgb = RgbCameras[i];
-		auto dmv = DmvCameras[i];
-		auto rgb_rt = RgbTextures[i];
-		auto dmv_rt = DmvTextures[i];
-
-		if (!dmv_rt || !dmv_rt->GetResource())
+		FArmedCameraState& State = ArmedCameraStates[i];
+		State = FArmedCameraState();
+		USceneCaptureComponent2D* Camera = RgbCameras[i];
+		if (!Camera)
 		{
-			UE_LOG(LogTemp, Error, TEXT("Bad DmvTexture || resource. Continuing"));
 			continue;
 		}
-		if (!rgb_rt || !rgb_rt->GetResource())
+		State.Transform = Camera->GetComponentTransform();
+		State.Timestamp = Now;
+		if (UIntrinsicSceneCaptureComponent2D* Intrinsic = Cast<UIntrinsicSceneCaptureComponent2D>(Camera))
 		{
-			UE_LOG(LogTemp, Error, TEXT("Bad RgbTexture || resource. Continuing"));
+			State.Intrinsics = Intrinsic->GetActiveIntrinsics();
+			State.bValid = true;
+		}
+	}
+
+	ArmedFrameIndex = ImageIndex++;
+}
+
+void UCaptureComponent::EnqueueArmedReadbacks()
+{
+	if (ArmedFrameIndex == INDEX_NONE)
+	{
+		return;
+	}
+	const int32 FrameIndex = ArmedFrameIndex;
+	ArmedFrameIndex = INDEX_NONE;
+
+	// Queue the copies and collect them when the GPU is done. The previous
+	// version called ReadLinearColorPixels, which ends in
+	// FlushRenderingCommands() -- the game thread sat waiting for the GPU twice
+	// per camera, every capture.
+	for (int32 i = 0; i < RgbCameras.Num(); i++)
+	{
+		if (!RgbTextures.IsValidIndex(i) || !DmvTextures.IsValidIndex(i))
+		{
 			continue;
 		}
 
-		// copy the dmv and rgb image data from GPU to CPU
-		TArray<FLinearColor> dmv_data;
-		TArray<FLinearColor> rgb_data;
-		dmv_data.SetNum(dmv_rt->SizeX * dmv_rt->SizeY);
-		rgb_data.SetNum(rgb_rt->SizeX * rgb_rt->SizeY);
-		dmv_rt->GameThread_GetRenderTargetResource()->ReadLinearColorPixels(dmv_data);
-		rgb_rt->GameThread_GetRenderTargetResource()->ReadLinearColorPixels(rgb_data);
-
-		// Get camera intrinsics
-		UIntrinsicSceneCaptureComponent2D* IntrinsicCamera = Cast<UIntrinsicSceneCaptureComponent2D>(rgb);
-		FCameraIntrinsics				   Intrinsics;
-		if (IntrinsicCamera)
+		FPendingFrame Pending;
+		Pending.CameraIndex = i;
+		Pending.FrameIndex = FrameIndex;
+		if (ArmedCameraStates.IsValidIndex(i))
 		{
-			Intrinsics = IntrinsicCamera->GetActiveIntrinsics();
-		}
-		else
-		{
-			// Default intrinsics if not using IntrinsicSceneCaptureComponent2D
-			Intrinsics.ImageWidth = rgb_rt->SizeX;
-			Intrinsics.ImageHeight = rgb_rt->SizeY;
-			Intrinsics.FocalLengthX = rgb_rt->SizeX / 2.0f;
-			Intrinsics.FocalLengthY = rgb_rt->SizeY / 2.0f;
-			Intrinsics.PrincipalPointX = rgb_rt->SizeX / 2.0f;
-			Intrinsics.PrincipalPointY = rgb_rt->SizeY / 2.0f;
-			Intrinsics.bMaintainYAxis = false;
+			Pending.State = ArmedCameraStates[i];
 		}
 
-		// Setup output directories (actor-based, matching CameraCaptureManager)
-		// Structure: SaveLocation/ActorName/CameraName/
-		FString ActorName = GetOwner() ? GetOwner()->GetName() : TEXT("UnknownActor");
-		FString CameraName = rgb->GetFName().ToString();
-		FString CameraPath = FPaths::Combine(*SaveLocation, *ActorName, *CameraName);
+		const bool bRgbQueued = CameraCaptureUtils::EnqueueReadback(RgbTextures[i], Pending.Rgb);
+		const bool bDmvQueued = CameraCaptureUtils::EnqueueReadback(DmvTextures[i], Pending.Dmv);
+		if (!bRgbQueued || !bDmvQueued)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Could not queue readback for camera %d; skipping this frame"), i);
+			continue;
+		}
+
+		PendingFrames.Add(MoveTemp(Pending));
+	}
+}
+
+void UCaptureComponent::HarvestAndWriteReadyFrames()
+{
+	for (int32 i = PendingFrames.Num() - 1; i >= 0; --i)
+	{
+		FPendingFrame& Pending = PendingFrames[i];
+		Pending.FramesWaiting++;
+
+		// Step one: the GPU copy has landed, so ask the render thread to lock the
+		// staging buffer and copy it out. Locking from here would assert --
+		// FRHIGPUTextureReadback::Lock requires the rendering thread.
+		if (!Pending.Rgb.IsHarvesting() && Pending.Rgb.IsCopyReady())
+		{
+			CameraCaptureUtils::BeginHarvestLinearColor(Pending.Rgb);
+		}
+		if (!Pending.Dmv.IsHarvesting() && Pending.Dmv.IsCopyReady())
+		{
+			CameraCaptureUtils::BeginHarvestLinearColor(Pending.Dmv);
+		}
+
+		// Step two: the render thread is done with both.
+		const bool bBothHarvested = Pending.Rgb.IsHarvested() && Pending.Dmv.IsHarvested();
+		if (!bBothHarvested)
+		{
+			if (Pending.FramesWaiting > MaxReadbackWaitFrames)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("Dropping frame %d for camera %d (readback did not complete within %d frames)"),
+					Pending.FrameIndex, Pending.CameraIndex, Pending.FramesWaiting);
+				PendingFrames.RemoveAt(i);
+			}
+			continue;
+		}
+
+		const bool bOk = !Pending.Rgb.HasFailed() && !Pending.Dmv.HasFailed()
+			&& Pending.Rgb.Pixels.IsValid() && Pending.Dmv.Pixels.IsValid();
+
+		const int32				CameraIndex = Pending.CameraIndex;
+		const int32				FrameIndex = Pending.FrameIndex;
+		const FArmedCameraState State = Pending.State;
+		const int32				RgbW = Pending.Rgb.Width;
+		const int32				RgbH = Pending.Rgb.Height;
+		const int32				DmvW = Pending.Dmv.Width;
+		const int32				DmvH = Pending.Dmv.Height;
+
+		// Keep the pixel buffers alive past the array entry we are about to drop.
+		TSharedPtr<TArray<FLinearColor>> RgbPixels = Pending.Rgb.Pixels;
+		TSharedPtr<TArray<FLinearColor>> DmvPixels = Pending.Dmv.Pixels;
+		PendingFrames.RemoveAt(i);
+
+		if (bOk)
+		{
+			WriteFrame(CameraIndex, FrameIndex, State, *RgbPixels, *DmvPixels, RgbW, RgbH, DmvW, DmvH);
+		}
+	}
+}
+
+void UCaptureComponent::WriteFrame(int32 CameraIndex, int32 FrameIndex, const FArmedCameraState& State,
+	const TArray<FLinearColor>& rgb_data, const TArray<FLinearColor>& dmv_data,
+	int32 RgbW, int32 RgbH, int32 DmvW, int32 DmvH)
+{
+	// A readback outlives the tick that queued it, so the camera it belongs to
+	// can be gone by the time the pixels land.
+	if (!RgbCameras.IsValidIndex(CameraIndex) || !RgbCameras[CameraIndex])
+	{
+		return;
+	}
+	auto rgb = RgbCameras[CameraIndex];
+
+	// Intrinsics as they were when this frame was armed, not as they are now:
+	// the snapshot is the whole point, since the pixels are several frames old by
+	// the time they land here.
+	FCameraIntrinsics Intrinsics;
+	if (State.bValid)
+	{
+		Intrinsics = State.Intrinsics;
+	}
+	else if (UIntrinsicSceneCaptureComponent2D* IntrinsicCamera = Cast<UIntrinsicSceneCaptureComponent2D>(rgb))
+	{
+		// No snapshot: a frame armed before this code existed, or a camera added
+		// mid-flight. Current values are better than none.
+		Intrinsics = IntrinsicCamera->GetActiveIntrinsics();
+	}
+	else
+	{
+		// Default intrinsics if not using IntrinsicSceneCaptureComponent2D
+		Intrinsics.ImageWidth = RgbW;
+		Intrinsics.ImageHeight = RgbH;
+		Intrinsics.FocalLengthX = RgbW / 2.0f;
+		Intrinsics.FocalLengthY = RgbH / 2.0f;
+		Intrinsics.PrincipalPointX = RgbW / 2.0f;
+		Intrinsics.PrincipalPointY = RgbH / 2.0f;
+		Intrinsics.bMaintainYAxis = false;
+	}
+
+	// Setup output directories (actor-based, matching CameraCaptureManager)
+	// Structure: SaveLocation/ActorName/CameraName/
+	FString ActorName = GetOwner() ? GetOwner()->GetName() : TEXT("UnknownActor");
+	FString CameraName = rgb->GetFName().ToString();
+	FString CameraPath = FPaths::Combine(*SaveLocation, *ActorName, *CameraName);
+	// Once per path, not once per frame: this was two filesystem calls per
+	// camera per frame for a path that only changes when a camera is added.
+	if (!DirectoriesEnsured.Contains(CameraPath))
+	{
 		if (!IFileManager::Get().DirectoryExists(*CameraPath))
 		{
 			IFileManager::Get().MakeDirectory(*CameraPath, true);
 		}
-
-		// Generate frame filename (frame_0000000.exr format, matching CameraCaptureManager)
-		FString FrameNumberStr = FString::Printf(TEXT("%07d"), ImageIndex);
-		FString rgb_filename = FPaths::Combine(*CameraPath, FString::Printf(TEXT("frame_%s.exr"), *FrameNumberStr));
-		FString dmv_filename = FPaths::Combine(*CameraPath, FString::Printf(TEXT("frame_%s_motion.exr"), *FrameNumberStr));
-		FString metadata_filename = FPaths::Combine(*CameraPath, FString::Printf(TEXT("frame_%s.json"), *FrameNumberStr));
-
-		// Use shared utility functions
-		// Write RGB+Depth EXR (RGB in RGB channels, Depth in Alpha channel)
-		CameraCaptureUtils::WriteEXRFile(rgb_filename, rgb_data, dmv_data, rgb_rt->SizeX, rgb_rt->SizeY, true);
-
-		// Write Motion Vectors EXR (X in R, Y in G channels)
-		CameraCaptureUtils::WriteEXRFile(dmv_filename, dmv_data, dmv_data, dmv_rt->SizeX, dmv_rt->SizeY, false);
-
-		// Write metadata JSON
-		FString ActorPath = GetOwner() ? GetOwner()->GetPathName() : TEXT("");
-		FString LevelName = GetWorld() ? GetWorld()->GetName() : TEXT("");
-		float	Timestamp = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
-
-		CameraCaptureUtils::WriteMetadataFile(metadata_filename, rgb, Intrinsics, ImageIndex, Timestamp, ActorPath, LevelName);
+		DirectoriesEnsured.Add(CameraPath);
 	}
 
-	// now update the state variable for which image we're on
-	ImageIndex++;
+	// Generate frame filename (frame_0000000.exr format, matching CameraCaptureManager)
+	FString FrameNumberStr = FString::Printf(TEXT("%07d"), FrameIndex);
+	FString rgb_filename = FPaths::Combine(*CameraPath, FString::Printf(TEXT("frame_%s.exr"), *FrameNumberStr));
+	FString dmv_filename = FPaths::Combine(*CameraPath, FString::Printf(TEXT("frame_%s_motion.exr"), *FrameNumberStr));
+	FString metadata_filename = FPaths::Combine(*CameraPath, FString::Printf(TEXT("frame_%s.json"), *FrameNumberStr));
+
+	// The depth/motion target can be a different size than the colour one when
+	// the camera has separate depth intrinsics. Passing dmv_data with the colour
+	// dimensions failed WriteEXRFile's size check, so the RGB+Depth EXR was never
+	// written at all -- one error log per frame and no data.
+	const bool bSameGrid = (DmvW == RgbW && DmvH == RgbH);
+
+	TArray<FLinearColor> dmv_on_colour_grid;
+	if (bSameGrid)
+	{
+		dmv_on_colour_grid = dmv_data;
+	}
+	else
+	{
+		// Only the depth channel has to reach the colour grid; the motion vectors
+		// stay in their own file at their own resolution, because a resampled
+		// vector no longer matches the pixels it was measured in.
+		TArray<float> depth;
+		depth.SetNumUninitialized(dmv_data.Num());
+		for (int32 p = 0; p < dmv_data.Num(); ++p)
+		{
+			depth[p] = dmv_data[p].R;
+		}
+
+		const TArray<float> resampled = CameraCaptureUtils::ResampleDepthNearest(depth, DmvW, DmvH, RgbW, RgbH);
+
+		if (resampled.Num() == RgbW * RgbH)
+		{
+			dmv_on_colour_grid.SetNumUninitialized(resampled.Num());
+			for (int32 p = 0; p < resampled.Num(); ++p)
+			{
+				dmv_on_colour_grid[p] = FLinearColor(resampled[p], 0.0f, 0.0f, 0.0f);
+			}
+		}
+		else
+		{
+			UE_LOG(LogTemp, Error, TEXT("Could not resample depth %dx%d onto colour %dx%d for %s"),
+				DmvW, DmvH, RgbW, RgbH, *CameraName);
+		}
+	}
+
+	// Write RGB+Depth EXR (RGB in RGB channels, Depth in Alpha channel)
+	if (dmv_on_colour_grid.Num() == rgb_data.Num())
+	{
+		CameraCaptureUtils::WriteEXRFile(rgb_filename, rgb_data, dmv_on_colour_grid, RgbW, RgbH, true);
+	}
+
+	// Write Motion Vectors EXR (X in R, Y in G channels) at the depth grid
+	CameraCaptureUtils::WriteEXRFile(dmv_filename, dmv_data, dmv_data, DmvW, DmvH, false);
+
+	// With differing grids the alpha channel above is resampled, so also emit the
+	// measured depth at its own resolution.
+	if (!bSameGrid)
+	{
+		const FString depth_filename = FPaths::Combine(*CameraPath, FString::Printf(TEXT("frame_%s_depth.exr"), *FrameNumberStr));
+		CameraCaptureUtils::WriteEXRFile(depth_filename, dmv_data, dmv_data, DmvW, DmvH, true);
+	}
+
+	// Write metadata JSON
+	FString ActorPath = GetOwner() ? GetOwner()->GetPathName() : TEXT("");
+	FString LevelName = GetWorld() ? GetWorld()->GetName() : TEXT("");
+	// Likewise the time and the pose: taken when the frame was armed.
+	const float		 Timestamp = State.bValid ? State.Timestamp : (GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f);
+	const FTransform CapturedTransform = State.Transform;
+
+	CameraCaptureUtils::WriteMetadataFile(metadata_filename, rgb, Intrinsics, FrameIndex, Timestamp, ActorPath, LevelName,
+		State.bValid ? &CapturedTransform : nullptr);
 }

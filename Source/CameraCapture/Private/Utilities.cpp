@@ -1,5 +1,7 @@
 #include "Utilities.h"
 #include "Components/SceneCaptureComponent2D.h"
+#include "Engine/TextureRenderTarget2D.h"
+#include "RenderGraphUtils.h"
 #include "ImageWriteQueue.h"
 #include "ImageWriteTask.h"
 #include "ImagePixelData.h"
@@ -50,12 +52,189 @@ namespace CameraCaptureUtils
 		return Obj;
 	}
 
-	bool WriteEXRFile(const FString& FilePath,
-		const TArray<FLinearColor>&	 RgbData,
-		const TArray<FLinearColor>&	 DmvData,
-		int32						 Width,
-		int32						 Height,
-		bool						 bIncludeDepth)
+	bool EnqueueReadback(UTextureRenderTarget2D* RenderTarget, FAsyncReadback& Out)
+	{
+		Out.Reset();
+		if (!RenderTarget)
+		{
+			return false;
+		}
+
+		FTextureRenderTargetResource* Resource = RenderTarget->GameThread_GetRenderTargetResource();
+		if (!Resource)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("EnqueueReadback: no render target resource"));
+			return false;
+		}
+
+		Out.Width = RenderTarget->SizeX;
+		Out.Height = RenderTarget->SizeY;
+		Out.PixelFormat = GetPixelFormatFromRenderTargetFormat(RenderTarget->RenderTargetFormat);
+		Out.Readback = MakeShared<FRHIGPUTextureReadback>(TEXT("CamCaptureReadback"));
+
+		TSharedPtr<FRHIGPUTextureReadback> ReadbackPtr = Out.Readback;
+		ENQUEUE_RENDER_COMMAND(CameraCaptureUtilsEnqueueReadback)
+		(
+			[ReadbackPtr, Resource](FRHICommandListImmediate& RHICmdList) {
+				if (FRHITexture* Texture = Resource->GetRenderTargetTexture())
+				{
+					// Five-argument virtual: the two-argument convenience overload
+					// lands on an unimplemented() base and asserts.
+					ReadbackPtr->EnqueueCopy(RHICmdList, Texture, FIntVector(0, 0, 0), 0, FIntVector(0, 0, 0));
+				}
+			});
+		return true;
+	}
+
+	bool BeginHarvestLinearColor(FAsyncReadback& Readback)
+	{
+		if (!Readback.IsCopyReady() || Readback.IsHarvesting())
+		{
+			return false;
+		}
+
+		const EPixelFormat Format = Readback.PixelFormat;
+		if (Format != PF_B8G8R8A8 && Format != PF_R8G8B8A8 && Format != PF_A32B32G32R32F && Format != PF_FloatRGBA)
+		{
+			UE_LOG(LogTemp, Error,
+				TEXT("BeginHarvestLinearColor: unsupported pixel format %d; skipping rather than reading at the wrong stride"),
+				static_cast<int32>(Format));
+			Readback.Reset();
+			return false;
+		}
+
+		// Everything the render command writes into is shared, so it stays alive
+		// even if the caller drops its FAsyncReadback before the copy lands.
+		Readback.Pixels = MakeShared<TArray<FLinearColor>>();
+		Readback.Done = MakeShared<FThreadSafeBool>(false);
+		Readback.Failed = MakeShared<FThreadSafeBool>(false);
+
+		TSharedPtr<FRHIGPUTextureReadback> Rb = Readback.Readback;
+		TSharedPtr<TArray<FLinearColor>>   Pixels = Readback.Pixels;
+		TSharedPtr<FThreadSafeBool>		   Done = Readback.Done;
+		TSharedPtr<FThreadSafeBool>		   Failed = Readback.Failed;
+		const int32						   Width = Readback.Width;
+		const int32						   Height = Readback.Height;
+
+		ENQUEUE_RENDER_COMMAND(CameraCaptureUtilsHarvestLinearColor)
+		(
+			[Rb, Pixels, Done, Failed, Width, Height, Format](FRHICommandListImmediate& RHICmdList) {
+				// Lock is only legal here; from the game thread it asserts
+				// IsInRenderingThread() inside FRHICommandListImmediate::Get().
+				int32 RowPitchInPixels = 0;
+				int32 BufferHeight = 0;
+				void* SrcData = Rb->Lock(RowPitchInPixels, &BufferHeight);
+				if (!SrcData)
+				{
+					UE_LOG(LogTemp, Error, TEXT("BeginHarvestLinearColor: failed to lock readback"));
+					Rb->Unlock();
+					*Failed = true;
+					*Done = true;
+					return;
+				}
+
+				if (Width <= 0 || Height <= 0 || RowPitchInPixels < Width || (BufferHeight > 0 && BufferHeight < Height))
+				{
+					UE_LOG(LogTemp, Error,
+						TEXT("BeginHarvestLinearColor: staging buffer does not hold %dx%d (pitch %d, buffer height %d)"),
+						Width, Height, RowPitchInPixels, BufferHeight);
+					Rb->Unlock();
+					*Failed = true;
+					*Done = true;
+					return;
+				}
+
+				Pixels->SetNumUninitialized(Width * Height);
+				FLinearColor* RESTRICT Dst = Pixels->GetData();
+
+				switch (Format)
+				{
+					case PF_A32B32G32R32F:
+					{
+						const FLinearColor* SrcRow = static_cast<const FLinearColor*>(SrcData);
+						for (int32 y = 0; y < Height; ++y)
+						{
+							FMemory::Memcpy(Dst, SrcRow, Width * sizeof(FLinearColor));
+							Dst += Width;
+							SrcRow += RowPitchInPixels;
+						}
+						break;
+					}
+					case PF_FloatRGBA:
+					{
+						const FFloat16Color* SrcRow = static_cast<const FFloat16Color*>(SrcData);
+						for (int32 y = 0; y < Height; ++y)
+						{
+							for (int32 x = 0; x < Width; ++x)
+							{
+								Dst[x] = FLinearColor(SrcRow[x]);
+							}
+							Dst += Width;
+							SrcRow += RowPitchInPixels;
+						}
+						break;
+					}
+					default:
+					{
+						const FColor* SrcRow = static_cast<const FColor*>(SrcData);
+						for (int32 y = 0; y < Height; ++y)
+						{
+							for (int32 x = 0; x < Width; ++x)
+							{
+								Dst[x] = FLinearColor(SrcRow[x]);
+							}
+							Dst += Width;
+							SrcRow += RowPitchInPixels;
+						}
+						break;
+					}
+				}
+
+				Rb->Unlock();
+				*Done = true;
+			});
+		return true;
+	}
+
+	TArray<float> ResampleDepthNearest(const TArray<float>& Src, int32 SrcW, int32 SrcH, int32 DstW, int32 DstH)
+	{
+		if (SrcW <= 0 || SrcH <= 0 || DstW <= 0 || DstH <= 0)
+		{
+			return TArray<float>();
+		}
+		if (Src.Num() != SrcW * SrcH)
+		{
+			UE_LOG(LogTemp, Error, TEXT("ResampleDepthNearest: source is %d values, expected %dx%d"), Src.Num(), SrcW, SrcH);
+			return TArray<float>();
+		}
+		if (SrcW == DstW && SrcH == DstH)
+		{
+			return Src;
+		}
+
+		TArray<float> Out;
+		Out.SetNumUninitialized(DstW * DstH);
+
+		// Map destination pixel centres into the source grid, so the result is
+		// centred rather than biased towards the origin by half a pixel.
+		const double ScaleX = static_cast<double>(SrcW) / static_cast<double>(DstW);
+		const double ScaleY = static_cast<double>(SrcH) / static_cast<double>(DstH);
+
+		for (int32 y = 0; y < DstH; ++y)
+		{
+			const int32			  SrcY = FMath::Clamp(static_cast<int32>((y + 0.5) * ScaleY), 0, SrcH - 1);
+			const float* RESTRICT SrcRow = Src.GetData() + static_cast<SIZE_T>(SrcY) * SrcW;
+			float* RESTRICT		  DstRow = Out.GetData() + static_cast<SIZE_T>(y) * DstW;
+			for (int32 x = 0; x < DstW; ++x)
+			{
+				const int32 SrcX = FMath::Clamp(static_cast<int32>((x + 0.5) * ScaleX), 0, SrcW - 1);
+				DstRow[x] = SrcRow[SrcX];
+			}
+		}
+		return Out;
+	}
+
+	bool WritePNGPixels(const FString& FilePath, TArray64<FColor> Pixels, int32 Width, int32 Height)
 	{
 		IImageWriteQueueModule* ImageWriteQueueModule = FModuleManager::Get().GetModulePtr<IImageWriteQueueModule>("ImageWriteQueue");
 		if (!ImageWriteQueueModule)
@@ -64,45 +243,45 @@ namespace CameraCaptureUtils
 			return false;
 		}
 
-		if (RgbData.Num() != Width * Height || DmvData.Num() != Width * Height)
+		if (Width <= 0 || Height <= 0 || Pixels.Num() != static_cast<int64>(Width) * Height)
 		{
-			UE_LOG(LogTemp, Error, TEXT("Image data size mismatch. Expected %dx%d, got RGB:%d DMV:%d"),
-				Width, Height, RgbData.Num(), DmvData.Num());
+			UE_LOG(LogTemp, Error, TEXT("WritePNGPixels: %lld pixels does not match %dx%d"), Pixels.Num(), Width, Height);
+			return false;
+		}
+
+		TUniquePtr<TImagePixelData<FColor>> PixelData = MakeUnique<TImagePixelData<FColor>>(
+			FIntPoint(Width, Height),
+			MoveTemp(Pixels));
+
+		TUniquePtr<FImageWriteTask> ImageTask = MakeUnique<FImageWriteTask>();
+		ImageTask->PixelData = MoveTemp(PixelData);
+		ImageTask->Filename = FilePath;
+		ImageTask->Format = EImageFormat::PNG;
+		ImageTask->CompressionQuality = (int32)EImageCompressionQuality::Default;
+		ImageTask->bOverwriteFile = true;
+
+		ImageWriteQueueModule->GetWriteQueue().Enqueue(MoveTemp(ImageTask));
+		return true;
+	}
+
+	bool WriteEXRPixels(const FString& FilePath, TArray64<FLinearColor> Pixels, int32 Width, int32 Height)
+	{
+		IImageWriteQueueModule* ImageWriteQueueModule = FModuleManager::Get().GetModulePtr<IImageWriteQueueModule>("ImageWriteQueue");
+		if (!ImageWriteQueueModule)
+		{
+			UE_LOG(LogTemp, Error, TEXT("Failed to load ImageWriteQueue module"));
+			return false;
+		}
+
+		if (Width <= 0 || Height <= 0 || Pixels.Num() != static_cast<int64>(Width) * Height)
+		{
+			UE_LOG(LogTemp, Error, TEXT("WriteEXRPixels: %lld pixels does not match %dx%d"), Pixels.Num(), Width, Height);
 			return false;
 		}
 
 		TUniquePtr<TImagePixelData<FLinearColor>> PixelData = MakeUnique<TImagePixelData<FLinearColor>>(
 			FIntPoint(Width, Height),
-			TArray64<FLinearColor>());
-
-		PixelData->Pixels.Reserve(Width * Height);
-
-		if (bIncludeDepth)
-		{
-			// RGB + Depth format: RGB from RgbData, depth from DmvData.R
-			for (int32 i = 0; i < Width * Height; ++i)
-			{
-				FLinearColor Pixel;
-				Pixel.R = RgbData[i].R;
-				Pixel.G = RgbData[i].G;
-				Pixel.B = RgbData[i].B;
-				Pixel.A = DmvData[i].R; // Depth in alpha channel
-				PixelData->Pixels.Add(Pixel);
-			}
-		}
-		else
-		{
-			// Motion vector format: X from DmvData.G, Y from DmvData.B
-			for (int32 i = 0; i < Width * Height; ++i)
-			{
-				FLinearColor Pixel;
-				Pixel.R = DmvData[i].G; // Motion X
-				Pixel.G = DmvData[i].B; // Motion Y
-				Pixel.B = 0.0f;
-				Pixel.A = 0.0f;
-				PixelData->Pixels.Add(Pixel);
-			}
-		}
+			MoveTemp(Pixels));
 
 		TUniquePtr<FImageWriteTask> ImageTask = MakeUnique<FImageWriteTask>();
 		ImageTask->PixelData = MoveTemp(PixelData);
@@ -111,9 +290,59 @@ namespace CameraCaptureUtils
 		ImageTask->CompressionQuality = (int32)EImageCompressionQuality::Default;
 		ImageTask->bOverwriteFile = true;
 
-		TFuture<bool> CompletionFuture = ImageWriteQueueModule->GetWriteQueue().Enqueue(MoveTemp(ImageTask));
-
+		ImageWriteQueueModule->GetWriteQueue().Enqueue(MoveTemp(ImageTask));
 		return true;
+	}
+
+	bool WriteEXRFile(const FString& FilePath,
+		const TArray<FLinearColor>&	 RgbData,
+		const TArray<FLinearColor>&	 DmvData,
+		int32						 Width,
+		int32						 Height,
+		bool						 bIncludeDepth)
+	{
+		if (Width <= 0 || Height <= 0)
+		{
+			UE_LOG(LogTemp, Error, TEXT("WriteEXRFile: invalid dimensions %dx%d"), Width, Height);
+			return false;
+		}
+
+		const int32 NumPixels = Width * Height;
+
+		// Both planes must already be on this grid. Callers with depth at a
+		// different resolution resample first (ResampleDepthNearest) or write the
+		// depth plane as its own file -- this function cannot know which was meant.
+		if (RgbData.Num() != NumPixels || DmvData.Num() != NumPixels)
+		{
+			UE_LOG(LogTemp, Error, TEXT("Image data size mismatch. Expected %dx%d, got RGB:%d DMV:%d"),
+				Width, Height, RgbData.Num(), DmvData.Num());
+			return false;
+		}
+
+		TArray64<FLinearColor> Pixels;
+		Pixels.SetNumUninitialized(NumPixels);
+		FLinearColor* RESTRICT		 Out = Pixels.GetData();
+		const FLinearColor* RESTRICT Rgb = RgbData.GetData();
+		const FLinearColor* RESTRICT Dmv = DmvData.GetData();
+
+		if (bIncludeDepth)
+		{
+			// RGB + Depth: colour from RgbData, depth from DmvData.R into alpha.
+			for (int32 i = 0; i < NumPixels; ++i)
+			{
+				Out[i] = FLinearColor(Rgb[i].R, Rgb[i].G, Rgb[i].B, Dmv[i].R);
+			}
+		}
+		else
+		{
+			// Motion vectors: X from DmvData.G, Y from DmvData.B.
+			for (int32 i = 0; i < NumPixels; ++i)
+			{
+				Out[i] = FLinearColor(Dmv[i].G, Dmv[i].B, 0.0f, 0.0f);
+			}
+		}
+
+		return WriteEXRPixels(FilePath, MoveTemp(Pixels), Width, Height);
 	}
 
 	bool WriteMetadataFile(const FString& FilePath,
@@ -122,7 +351,8 @@ namespace CameraCaptureUtils
 		int32							  FrameNumber,
 		float							  Timestamp,
 		const FString&					  ActorPath,
-		const FString&					  LevelName)
+		const FString&					  LevelName,
+		const FTransform*				  CapturedTransform)
 	{
 		if (!Camera)
 		{
@@ -140,8 +370,11 @@ namespace CameraCaptureUtils
 		FString CameraId = Camera->GetOwner() ? Camera->GetOwner()->GetName() : TEXT("Unknown");
 		RootObject->SetStringField(TEXT("camera_id"), CameraId);
 
-		// World transform
-		FTransform CameraTransform = Camera->GetComponentTransform();
+		// World transform: the pose the frame was CAPTURED at, when the caller
+		// snapshotted one. Read off the live component here it describes wherever
+		// the camera has got to by the time the pixels landed, which for a moving
+		// camera is a different place.
+		const FTransform CameraTransform = CapturedTransform ? *CapturedTransform : Camera->GetComponentTransform();
 		RootObject->SetObjectField(TEXT("world_transform"), TransformToJsonObject(CameraTransform));
 
 		// Camera intrinsics
