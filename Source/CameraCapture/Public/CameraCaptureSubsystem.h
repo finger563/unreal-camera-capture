@@ -272,6 +272,17 @@ public:
 	/** Get all registered cameras */
 	TArray<UIntrinsicSceneCaptureComponent2D*> GetRegisteredCameras() const;
 
+	/**
+	 * The depth/motion render target for a camera, or null.
+	 *
+	 * Null is a normal answer, not a failure: in SingleCaptureColorDepth mode
+	 * there is no second target at all -- depth rides in the colour target's
+	 * alpha -- and a camera that has not been set up yet has none either. A
+	 * viewer wanting the colour feed reads Camera->TextureTarget directly.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Camera Capture")
+	UTextureRenderTarget2D* GetDepthRenderTarget(UIntrinsicSceneCaptureComponent2D* Camera) const;
+
 	// ============================================================================
 	// Capture Control
 	// ============================================================================
@@ -299,6 +310,10 @@ public:
 	/** Set how often to capture (1 = every frame, 2 = every other frame, etc.) */
 	UFUNCTION(BlueprintCallable, Category = "Camera Capture")
 	void SetCaptureRate(int32 InCaptureEveryNFrames);
+
+	/** Frames between captures; 1 means every frame. */
+	UFUNCTION(BlueprintPure, Category = "Camera Capture")
+	int32 GetCaptureRate() const { return CaptureEveryNFrames; }
 
 	/** Set output directory for captured data */
 	UFUNCTION(BlueprintCallable, Category = "Camera Capture")

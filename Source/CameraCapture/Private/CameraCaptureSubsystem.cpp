@@ -1146,6 +1146,19 @@ FCaptureData UCameraCaptureSubsystem::BuildCaptureMetadata(UIntrinsicSceneCaptur
 	return Data;
 }
 
+UTextureRenderTarget2D* UCameraCaptureSubsystem::GetDepthRenderTarget(UIntrinsicSceneCaptureComponent2D* Camera) const
+{
+	if (!Camera)
+	{
+		return nullptr;
+	}
+	if (const TWeakObjectPtr<UTextureRenderTarget2D>* Found = DmvRenderTargets.Find(Camera))
+	{
+		return Found->Get();
+	}
+	return nullptr;
+}
+
 void UCameraCaptureSubsystem::EnsureCameraRenderTarget(UIntrinsicSceneCaptureComponent2D* Camera)
 {
 	FCameraIntrinsics Intrinsics = Camera->GetActiveIntrinsics();
