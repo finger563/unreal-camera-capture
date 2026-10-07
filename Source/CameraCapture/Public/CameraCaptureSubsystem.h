@@ -189,6 +189,15 @@ enum class ERammsCaptureMode : uint8
 	 * have its own resolution.
 	 */
 	ColorPlusDepthMotion UMETA(DisplayName = "Colour + depth/motion (2 renders)"),
+	// NOTE: this mode's depth is NOT in the centimetres FCaptureData documents.
+	// The DMV material reads SceneDepth unscaled -- which is centimetres -- but
+	// the DMV camera captures SCS_FinalColorLDR, so the value is tonemapped on
+	// the way out. Measured against SingleCaptureColorDepth on the same scene and
+	// the same cameras: 0.125..0.702 here, 615..1e13 cm there. The values stay
+	// monotonic with distance, so a visualisation still reads correctly, but they
+	// are not metric and must not be treated as distances. Fixing it means
+	// changing the DMV camera's capture source, which affects every consumer of
+	// the existing files, so it is called out rather than changed quietly.
 
 	/**
 	 * One render per camera, using SCS_SceneColorSceneDepth: scene colour in RGB
@@ -210,9 +219,15 @@ enum class ERammsCaptureMode : uint8
 	 * one render target they necessarily share a resolution, so separate depth
 	 * intrinsics are ignored.
 	 *
-	 * Depth is in centimetres, as FCaptureData documents. So is the other mode's:
-	 * the DMV material reads SceneDepth unscaled, and SceneDepth is already
-	 * centimetres. Both modes produce centimetres, measured differently.
+	 * Depth is in centimetres, as FCaptureData documents -- genuinely so: alpha
+	 * carries SceneDepth untouched, measured at 615 cm for near geometry and 1e13
+	 * where the sky is.
+	 *
+	 * This is the ONLY mode for which that contract currently holds. The DMV pass
+	 * does read SceneDepth unscaled, but its camera captures SCS_FinalColorLDR,
+	 * so the value is tonemapped before anything reads it: the same scene that
+	 * reports hundreds of centimetres here comes back as 0.125..0.702 there. See
+	 * ERammsCaptureMode::ColorPlusDepthMotion.
 	 */
 	SingleCaptureColorDepth UMETA(DisplayName = "Single capture, colour + depth in alpha (1 render)")
 };
