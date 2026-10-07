@@ -966,6 +966,59 @@ void UCameraCaptureSubsystem::HarvestReadyReadbacks()
 	}
 }
 
+/**
+ * Check a readback against the staging texture it actually owns, before anyone
+ * strides through it.
+ *
+ * The pitch/height guard in each harvest works in PIXELS, so it cannot see a
+ * FORMAT disagreement -- and a format disagreement is the dangerous one. A
+ * readback whose staging texture was created for an RGBA8 target is 4 bytes per
+ * pixel; harvested as RGBA32f it is read at 16, which walks four times the
+ * buffer and takes the render thread down. That is not hypothetical: it is what
+ * a pool that ignored format produced, in HarvestDmvReadback, via a stack
+ * through ExecuteCommand.
+ *
+ * FRHIGPUTextureReadback exposes its staging textures, so the real descriptor is
+ * available and worth asking rather than inferring. Keyed pooling should make
+ * this unreachable; it is here because the consequence of being wrong is a heap
+ * overrun rather than a bad frame.
+ */
+bool UCameraCaptureSubsystem::ReadbackMatchesItsStagingTexture(const FPendingReadback& Readback, const TCHAR* Label)
+{
+	check(IsInRenderingThread());
+	if (!Readback.Readback.IsValid())
+	{
+		return false;
+	}
+
+	const FRHITexture* Staging = Readback.Readback->DestinationStagingTextures[0].GetReference();
+	if (!Staging)
+	{
+		// Nothing allocated yet means no copy has landed; the caller's readiness
+		// check should have caught it, so say so rather than reading anyway.
+		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] %s readback has no staging texture; skipping"), Label);
+		return false;
+	}
+
+	const FRHITextureDesc& Desc = Staging->GetDesc();
+	if (Desc.Format != Readback.PixelFormat)
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("[CameraCaptureSubsystem] %s readback staging texture is format %d but the harvest expects %d; skipping ")
+				TEXT("rather than reading it at the wrong stride"),
+			Label, static_cast<int32>(Desc.Format), static_cast<int32>(Readback.PixelFormat));
+		return false;
+	}
+	if (Desc.Extent.X < Readback.Width || Desc.Extent.Y < Readback.Height)
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("[CameraCaptureSubsystem] %s readback staging texture is %dx%d but %dx%d was requested; skipping"),
+			Label, Desc.Extent.X, Desc.Extent.Y, Readback.Width, Readback.Height);
+		return false;
+	}
+	return true;
+}
+
 void UCameraCaptureSubsystem::HarvestRgbReadback(FPendingReadback& Readback, FCaptureData& OutData)
 {
 	check(IsInRenderingThread());
@@ -979,6 +1032,11 @@ void UCameraCaptureSubsystem::HarvestRgbReadback(FPendingReadback& Readback, FCa
 			TEXT("[CameraCaptureSubsystem] RGB readback has unsupported pixel format %d; skipping rather than mis-reading it. ")
 				TEXT("Use an RGBA8, RGBA16f or RGBA32f render target."),
 			static_cast<int32>(Format));
+		return;
+	}
+
+	if (!ReadbackMatchesItsStagingTexture(Readback, TEXT("RGB")))
+	{
 		return;
 	}
 
@@ -1124,6 +1182,11 @@ void UCameraCaptureSubsystem::HarvestDmvReadback(FPendingReadback& Readback, FCa
 			TEXT("[CameraCaptureSubsystem] DMV readback has pixel format %d, which cannot carry float depth; skipping. ")
 				TEXT("Use an RGBA32f render target for depth/motion."),
 			static_cast<int32>(Format));
+		return;
+	}
+
+	if (!ReadbackMatchesItsStagingTexture(Readback, TEXT("DMV")))
+	{
 		return;
 	}
 

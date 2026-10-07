@@ -564,6 +564,18 @@ protected:
 	void ReleaseReadback(TSharedPtr<FRHIGPUTextureReadback> Readback, const FReadbackShape& Shape);
 
 	/**
+	 * Check a readback against the staging texture it actually owns, before
+	 * anything strides through it. Render thread only.
+	 *
+	 * The pitch/height guard inside each harvest works in PIXELS and so cannot
+	 * see a FORMAT disagreement -- which is the dangerous one, because reading a
+	 * 4-byte-per-pixel buffer at 16 walks four times its length and takes the
+	 * render thread down. Keyed pooling should make that unreachable; this is
+	 * here because the cost of being wrong is a heap overrun and not a bad frame.
+	 */
+	static bool ReadbackMatchesItsStagingTexture(const FPendingReadback& Readback, const TCHAR* Label);
+
+	/**
 	 * Extract pixel data from a completed RGB readback into FCaptureData.
 	 *
 	 * RENDER THREAD ONLY. FRHIGPUTextureReadback::Lock goes through
