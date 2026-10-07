@@ -434,6 +434,40 @@ protected:
 	// ============================================================================
 
 	/** Pending readback for a single camera's single channel (RGB or DMV) */
+	/**
+	 * What a pooled readback's staging texture is shaped for.
+	 *
+	 * A readback may only be reused for a texture of the SAME size and format.
+	 * FRHIGPUTextureReadback::EnqueueCopy recreates its staging texture only
+	 * when the texture DIMENSION changes (2D vs 3D), and on platforms that read
+	 * back through 2D textures only it never recreates one at all -- the engine
+	 * says so itself: "Assume for now that every enqueue happens on a texture of
+	 * the same format and size (when reused)."
+	 *
+	 * So a readback is welded to the geometry of the first texture it ever saw.
+	 * Handing a 640x360 one to a 1280x720 camera copied into the smaller staging
+	 * texture and Lock() then reported pitch 640, buffer height 360, which the
+	 * harvest's geometry guard rejected -- every frame, for every camera that
+	 * drew a readback shaped for a different one.
+	 */
+	struct FReadbackShape
+	{
+		int32		 Width = 0;
+		int32		 Height = 0;
+		EPixelFormat Format = PF_Unknown;
+
+		bool operator==(const FReadbackShape& Other) const
+		{
+			return Width == Other.Width && Height == Other.Height && Format == Other.Format;
+		}
+
+		friend uint32 GetTypeHash(const FReadbackShape& Shape)
+		{
+			return HashCombine(HashCombine(::GetTypeHash(Shape.Width), ::GetTypeHash(Shape.Height)),
+				::GetTypeHash(static_cast<int32>(Shape.Format)));
+		}
+	};
+
 	struct FPendingReadback
 	{
 		// Shared, not unique: the lock and copy happen in a render command that
@@ -476,6 +510,13 @@ protected:
 		{
 			return Readback.IsValid() && CopyIssued.IsValid() && *CopyIssued && Readback->IsReady();
 		}
+
+		/** The shape this readback's staging texture was built for, and so the
+		 *  only shape it can be reused at. */
+		FReadbackShape GetShape() const
+		{
+			return FReadbackShape{ Width, Height, PixelFormat };
+		}
 	};
 
 	/** All pending state for a single camera in a single frame */
@@ -496,25 +537,31 @@ protected:
 	static constexpr int32 MaxReadbackWaitFrames = 10;
 
 	/**
-	 * Readback objects kept for reuse rather than reallocated every frame.
+	 * Readback objects kept for reuse rather than reallocated every frame,
+	 * bucketed by the shape they can serve.
 	 *
-	 * Each FRHIGPUTextureReadback owns a GPU staging buffer. Allocating one per
-	 * camera per channel per capture frame meant creating and destroying two
-	 * staging buffers per camera every frame; EnqueueCopy resizes an existing
-	 * buffer when the texture changes, so the same object serves any camera.
+	 * Each FRHIGPUTextureReadback owns a GPU staging texture. Allocating one per
+	 * camera per channel per capture frame meant creating and destroying two of
+	 * them per camera every frame. Reuse is still worth having -- a camera's
+	 * shape does not change between frames, so the steady state is a hit -- it
+	 * just cannot be shared across shapes.
 	 */
-	TArray<TSharedPtr<FRHIGPUTextureReadback>> ReadbackPool;
+	TMap<FReadbackShape, TArray<TSharedPtr<FRHIGPUTextureReadback>>> ReadbackPool;
 
 	/** Enough for several cameras with both channels in flight; past this,
 	 *  returned readbacks are dropped rather than retained forever. */
 	static constexpr int32 MaxPooledReadbacks = 32;
 
-	/** Take a readback from the pool, or make one if the pool is empty. */
-	TSharedPtr<FRHIGPUTextureReadback> AcquireReadback();
+	/** How many readbacks are pooled across every shape. */
+	int32 CountPooledReadbacks() const;
 
-	/** Return a finished readback to the pool. Safe to call with null.
-	 *  Game thread only -- the pool is not synchronised. */
-	void ReleaseReadback(TSharedPtr<FRHIGPUTextureReadback> Readback);
+	/** Take a readback shaped for this texture, or make one. */
+	TSharedPtr<FRHIGPUTextureReadback> AcquireReadback(const FReadbackShape& Shape);
+
+	/** Return a finished readback to the pool, under the shape it was used at.
+	 *  Safe to call with null. Game thread only -- the pool is not
+	 *  synchronised. */
+	void ReleaseReadback(TSharedPtr<FRHIGPUTextureReadback> Readback, const FReadbackShape& Shape);
 
 	/**
 	 * Extract pixel data from a completed RGB readback into FCaptureData.

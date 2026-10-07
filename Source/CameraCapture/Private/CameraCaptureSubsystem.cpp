@@ -747,16 +747,22 @@ namespace
 	}
 } // namespace
 
-TSharedPtr<FRHIGPUTextureReadback> UCameraCaptureSubsystem::AcquireReadback()
+TSharedPtr<FRHIGPUTextureReadback> UCameraCaptureSubsystem::AcquireReadback(const FReadbackShape& Shape)
 {
-	if (ReadbackPool.Num() > 0)
+	// Only a readback already shaped for this exact size and format: see
+	// FReadbackShape. Anything else copies into a staging texture of the wrong
+	// geometry, which the harvest rejects.
+	if (TArray<TSharedPtr<FRHIGPUTextureReadback>>* Bucket = ReadbackPool.Find(Shape))
 	{
-		return ReadbackPool.Pop(EAllowShrinking::No);
+		if (Bucket->Num() > 0)
+		{
+			return Bucket->Pop(EAllowShrinking::No);
+		}
 	}
 	return MakeShared<FRHIGPUTextureReadback>(TEXT("CamCaptureReadback"));
 }
 
-void UCameraCaptureSubsystem::ReleaseReadback(TSharedPtr<FRHIGPUTextureReadback> Readback)
+void UCameraCaptureSubsystem::ReleaseReadback(TSharedPtr<FRHIGPUTextureReadback> Readback, const FReadbackShape& Shape)
 {
 	if (!Readback)
 	{
@@ -769,12 +775,30 @@ void UCameraCaptureSubsystem::ReleaseReadback(TSharedPtr<FRHIGPUTextureReadback>
 		// Something still holds it; dropping our reference is the safe move.
 		return;
 	}
-	// Past the cap the object is simply destroyed. Holding every readback a
-	// burst ever needed would keep its staging buffer alive for the session.
-	if (ReadbackPool.Num() < MaxPooledReadbacks)
+	// A readback with no recorded shape cannot be matched to a future texture
+	// safely, so it is dropped rather than pooled under a guess.
+	if (Shape.Width <= 0 || Shape.Height <= 0 || Shape.Format == PF_Unknown)
 	{
-		ReadbackPool.Add(MoveTemp(Readback));
+		return;
 	}
+	// The cap is across all shapes: it exists to stop a burst keeping staging
+	// textures alive for the session, and a per-bucket cap would miss that when
+	// cameras come and go at many resolutions.
+	if (CountPooledReadbacks() >= MaxPooledReadbacks)
+	{
+		return;
+	}
+	ReadbackPool.FindOrAdd(Shape).Add(MoveTemp(Readback));
+}
+
+int32 UCameraCaptureSubsystem::CountPooledReadbacks() const
+{
+	int32 Total = 0;
+	for (const TPair<FReadbackShape, TArray<TSharedPtr<FRHIGPUTextureReadback>>>& Pair : ReadbackPool)
+	{
+		Total += Pair.Value.Num();
+	}
+	return Total;
 }
 
 void UCameraCaptureSubsystem::EnqueueAsyncReadback(UTextureRenderTarget2D* RenderTarget, TSharedPtr<FRHIGPUTextureReadback>& OutReadback,
@@ -792,10 +816,15 @@ void UCameraCaptureSubsystem::EnqueueAsyncReadback(UTextureRenderTarget2D* Rende
 		return;
 	}
 
-	// Reused rather than allocated: each one owns a GPU staging buffer, and
-	// EnqueueCopy resizes it when the texture differs, so one object serves any
-	// camera. This used to allocate two per camera every capture frame.
-	OutReadback = AcquireReadback();
+	// Reused rather than allocated: each one owns a GPU staging texture, and
+	// this used to allocate two per camera every capture frame. Reuse is keyed
+	// by shape, because EnqueueCopy will NOT reshape an existing staging
+	// texture -- see FReadbackShape.
+	FReadbackShape Shape;
+	Shape.Width = RenderTarget->SizeX;
+	Shape.Height = RenderTarget->SizeY;
+	Shape.Format = GetPixelFormatFromRenderTargetFormat(RenderTarget->RenderTargetFormat);
+	OutReadback = AcquireReadback(Shape);
 
 	// Captured by SHARED pointer, not raw. A raw one let the game thread destroy
 	// the readback -- Deinitialize empties the pool, and PIE teardown does that
@@ -911,13 +940,16 @@ void UCameraCaptureSubsystem::HarvestReadyReadbacks()
 						// left the member itself as a second owner -- so
 						// IsUnique() was false every time and the pool this
 						// branch exists for stayed permanently empty.
+						//
+						// The shape goes with it: a readback can only be handed
+						// to a texture of the same size and format.
 						if (RgbRb.IsValid())
 						{
-							Self->ReleaseReadback(MoveTemp(RgbRb->Readback));
+							Self->ReleaseReadback(MoveTemp(RgbRb->Readback), RgbRb->GetShape());
 						}
 						if (DmvRb.IsValid())
 						{
-							Self->ReleaseReadback(MoveTemp(DmvRb->Readback));
+							Self->ReleaseReadback(MoveTemp(DmvRb->Readback), DmvRb->GetShape());
 						}
 					});
 				});
