@@ -67,7 +67,21 @@ void UCameraCaptureSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
 
-	// Load M_DmvCapture material from plugin Content folder
+	// Motion only. Depth comes from SCS_SceneColorSceneDepth now, because the
+	// depth this pass writes to R was never a distance.
+	//
+	// The velocity stays in G and B, where this material has always put it, and
+	// R is simply not read. Moving it down to R,G does not work and is not worth
+	// more attempts from a script: three duplicates of this material, one of them
+	// preserving BlendableLocation, blend mode, priority AND the SceneDepth
+	// sample so the only change was the MakeFloat3 wiring, all returned scene
+	// colour where velocity belongs. SceneTexture:Velocity is only valid at one
+	// point in the post-process stack and a duplicate evidently does not inherit
+	// whatever makes it valid there.
+	//
+	// The acceptance test for anyone who tries again by hand: a STATIC camera
+	// must read |velocity| ~0. This material gives 0.0003; every duplicate gave
+	// 0.48, correlating +0.9 with scene luminance.
 	FString MaterialPath = TEXT("/Script/Engine.Material'/CameraCapture/Materials/M_DmvCapture.M_DmvCapture'");
 	DmvCaptureMaterialBase = Cast<UMaterial>(StaticLoadObject(UMaterial::StaticClass(), nullptr, *MaterialPath));
 
@@ -1399,11 +1413,10 @@ void UCameraCaptureSubsystem::HarvestDmvReadback(FPendingReadback& Readback, FCa
 	// reads the depth buffer directly, in both modes, and this pass does the one
 	// thing it was always good at.
 	//
-	// The material still writes depth to R -- its layout changes with the
-	// motion/ID pass -- so R is simply not read.
 	FVector2D* RESTRICT MotionDst = OutData.MotionVectorData.GetData();
 
-	// DMV layout: R=Depth, G=MotionX, B=MotionY, A=1
+	// Layout: R=depth (unread -- see the material path above), G=MotionX,
+	// B=MotionY.
 	if (Format == PF_A32B32G32R32F)
 	{
 		const FLinearColor* SrcRow = static_cast<const FLinearColor*>(SrcData);
