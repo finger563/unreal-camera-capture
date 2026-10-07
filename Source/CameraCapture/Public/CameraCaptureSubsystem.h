@@ -328,6 +328,25 @@ public:
 	/** Set which channels to capture (RGB, Depth, Motion Vectors) */
 	void SetCaptureChannels(bool bRGB, bool bDepth, bool bMotionVectors);
 
+	/**
+	 * Which channels are being captured.
+	 *
+	 * For a viewer rather than for the capture path: a UI offering a depth or
+	 * motion view has to know whether there is anything behind it, and motion in
+	 * particular is only ever produced by the DMV pass -- see GetCaptureMode.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Camera Capture")
+	bool IsCapturingRGB() const { return bCaptureRGB; }
+
+	UFUNCTION(BlueprintPure, Category = "Camera Capture")
+	bool IsCapturingDepth() const { return bCaptureDepth; }
+
+	/** True only when motion vectors are both requested AND producible: single
+	 *  capture mode has no DMV pass, so it never produces them whatever was
+	 *  asked for. */
+	UFUNCTION(BlueprintPure, Category = "Camera Capture")
+	bool IsCapturingMotionVectors() const { return bCaptureMotionVectors && !IsSingleCaptureMode(); }
+
 	/** Set the depth+motion capture material (M_DmvCapture) */
 	UFUNCTION(BlueprintCallable, Category = "Camera Capture")
 	void SetDmvMaterial(UMaterial* Material);
