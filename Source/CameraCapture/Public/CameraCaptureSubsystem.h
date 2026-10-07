@@ -123,16 +123,32 @@ struct CAMERACAPTURE_API FCaptureData
 	UPROPERTY(BlueprintReadOnly, Category = "Capture Data")
 	int32 Height = 0;
 
-	/** Depth/motion width in pixels. A camera with separate depth intrinsics
-	 *  captures depth at its own resolution, so DepthData and MotionVectorData
-	 *  are NOT Width*Height in general -- index them by these instead. Zero
-	 *  means no depth was captured; equal to Width/Height in the common case. */
+	/** Depth width in pixels. A camera with separate depth intrinsics captures
+	 *  depth at its own resolution, so DepthData is NOT Width*Height in general
+	 *  -- index it by these instead. Zero means no depth was captured; equal to
+	 *  Width/Height in the common case. */
 	UPROPERTY(BlueprintReadOnly, Category = "Capture Data")
 	int32 DepthWidth = 0;
 
-	/** Depth/motion height in pixels. See DepthWidth. */
+	/** Depth height in pixels. See DepthWidth. */
 	UPROPERTY(BlueprintReadOnly, Category = "Capture Data")
 	int32 DepthHeight = 0;
+
+	/** Motion vector width in pixels, and its own field rather than DepthWidth's
+	 *  business.
+	 *
+	 *  Motion used to come out of the depth pass, so one pair of dimensions
+	 *  described both. They are separate passes now and can legitimately differ:
+	 *  SingleCaptureColorDepth captures depth on the COLOUR grid while the motion
+	 *  pass still uses the depth intrinsics. Validating motion against the depth
+	 *  grid, as the writer did, silently dropped every motion plane in that
+	 *  configuration. Zero means no motion was captured. */
+	UPROPERTY(BlueprintReadOnly, Category = "Capture Data")
+	int32 MotionWidth = 0;
+
+	/** Motion vector height in pixels. See MotionWidth. */
+	UPROPERTY(BlueprintReadOnly, Category = "Capture Data")
+	int32 MotionHeight = 0;
 
 	/** True when depth was captured at a different resolution than colour, so a
 	 *  consumer that needs them aligned has to resample one of them. */
@@ -184,54 +200,28 @@ UENUM(BlueprintType)
 enum class ERammsCaptureMode : uint8
 {
 	/**
-	 * Two renders per camera: colour, plus a DMV pass for depth and motion
-	 * vectors. Required for motion vectors, and the only mode where depth can
-	 * have its own resolution.
+	 * One render. SCS_SceneColorSceneDepth gives linear scene colour in RGB and
+	 * scene depth in alpha, in centimetres, straight from the engine.
+	 *
+	 * The default, and the cheapest thing that produces both planes. Colour is
+	 * linear rather than tone-mapped -- the harvest sRGB-encodes it on the way to
+	 * 8 bits, so it reads correctly, but highlights clip because nothing rolls
+	 * them off.
 	 */
-	ColorPlusDepthMotion UMETA(DisplayName = "Colour + depth/motion (2 renders)"),
-	// NOTE: this mode's depth is NOT in the centimetres FCaptureData documents.
-	// The DMV material reads SceneDepth unscaled -- which is centimetres -- but
-	// the DMV camera captures SCS_FinalColorLDR, so the value is tonemapped on
-	// the way out. Measured against SingleCaptureColorDepth on the same scene and
-	// the same cameras: 0.125..0.702 here, 615..1e13 cm there. The values stay
-	// monotonic with distance, so a visualisation still reads correctly, but they
-	// are not metric and must not be treated as distances. Fixing it means
-	// changing the DMV camera's capture source, which affects every consumer of
-	// the existing files, so it is called out rather than changed quietly.
+	SingleCaptureColorDepth UMETA(DisplayName = "Colour + depth, one render"),
 
 	/**
-	 * One render per camera, using SCS_SceneColorSceneDepth: scene colour in RGB
-	 * and scene depth in alpha, straight from the engine.
+	 * Two renders: a tone-mapped colour capture, plus a second capture used only
+	 * for its depth alpha.
 	 *
-	 * The render target is float, but the COLOUR plane is not delivered as
-	 * float: the harvest converts it through FColor, so what reaches
-	 * FCaptureData::ImageData is 8 bits per channel of linear scene colour --
-	 * which is a poor fit for linear values, since without a transfer curve the
-	 * quantisation falls almost entirely in the darks. Depth keeps its full float
-	 * precision; it is read out of alpha directly. Carrying colour as float would
-	 * mean widening FCaptureData, and every consumer of it, which has not been
-	 * done.
-	 *
-	 * Roughly halves the per-camera cost. Three consequences worth knowing:
-	 * motion vectors are not produced at all; colour is linear scene colour
-	 * rather than the tone-mapped image ColorCaptureSource selects for the other
-	 * mode (SCS_FinalColorLDR by default); and because both planes come out of
-	 * one render target they necessarily share a resolution, so separate depth
-	 * intrinsics are ignored.
-	 *
-	 * Depth is in centimetres, as FCaptureData documents -- genuinely so: alpha
-	 * carries SceneDepth untouched, measured at 615 cm for near geometry and 1e13
-	 * where the sky is.
-	 *
-	 * This is the ONLY mode for which that contract currently holds. The DMV pass
-	 * does read SceneDepth unscaled, but its camera captures SCS_FinalColorLDR,
-	 * so the value is tonemapped before anything reads it: the same scene that
-	 * reports hundreds of centimetres here comes back as 0.125..0.702 there. See
-	 * ERammsCaptureMode::ColorPlusDepthMotion.
+	 * For when colour appearance matters more than the render. The depth half is
+	 * identical to the mode above -- same engine path, same centimetres -- so the
+	 * two modes never disagree about distance. It is also the only mode in which
+	 * depth can have its own resolution, since the depth capture is its own
+	 * camera.
 	 */
-	SingleCaptureColorDepth UMETA(DisplayName = "Single capture, colour + depth in alpha (1 render)")
+	TonemappedColorPlusDepth UMETA(DisplayName = "Tone-mapped colour + depth, two renders")
 };
-
 /**
  * Capture statistics for monitoring performance
  */
@@ -309,6 +299,11 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Camera Capture")
 	UTextureRenderTarget2D* GetDepthRenderTarget(UIntrinsicSceneCaptureComponent2D* Camera) const;
 
+	/** The motion/ID pass's target for a camera, or null when that pass is not
+	 *  running. Velocity in R,G; semantic class from the custom stencil in B. */
+	UFUNCTION(BlueprintPure, Category = "Camera Capture")
+	UTextureRenderTarget2D* GetMotionRenderTarget(UIntrinsicSceneCaptureComponent2D* Camera) const;
+
 	// ============================================================================
 	// Capture Control
 	// ============================================================================
@@ -365,11 +360,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Camera Capture")
 	bool IsCapturingDepth() const { return bCaptureDepth; }
 
-	/** True only when motion vectors are both requested AND producible: single
-	 *  capture mode has no DMV pass, so it never produces them whatever was
-	 *  asked for. */
+	/** Motion vectors come from their own pass now, independent of how colour and
+	 *  depth are captured, so this is simply whether they were asked for. */
 	UFUNCTION(BlueprintPure, Category = "Camera Capture")
-	bool IsCapturingMotionVectors() const { return bCaptureMotionVectors && !IsSingleCaptureMode(); }
+	bool IsCapturingMotionVectors() const { return bCaptureMotionVectors; }
 
 	/** Set the depth+motion capture material (M_DmvCapture) */
 	UFUNCTION(BlueprintCallable, Category = "Camera Capture")
@@ -528,9 +522,16 @@ protected:
 		// heap. PF_Unknown means "do not interpret" rather than "assume 8-bit".
 		EPixelFormat PixelFormat = PF_Unknown;
 
-		/** Single-capture mode: alpha carries scene depth in cm, so the same
-		 *  readback supplies both planes and there is no second one. */
+		/** Alpha carries scene depth in centimetres. True for the colour capture
+		 *  in SingleCaptureColorDepth, and always for the dedicated depth
+		 *  capture. */
 		bool bDepthInAlpha = false;
+
+		/** Harvest only the depth out of alpha and leave the colour plane alone.
+		 *  Set for the dedicated depth capture, whose RGB is scene colour nobody
+		 *  asked for -- writing it would overwrite the tone-mapped colour the
+		 *  other capture produced. */
+		bool bDepthOnly = false;
 
 		/**
 		 * Set by the render thread once EnqueueCopy has actually been issued.
@@ -570,6 +571,9 @@ protected:
 		FPendingReadback DmvReadback;
 		bool			 bHasRgb = false;
 		bool			 bHasDmv = false;
+		/** The dedicated depth capture, in TonemappedColorPlusDepth. */
+		FPendingReadback DepthReadback;
+		bool			 bHasDepth = false;
 		int32			 FramesWaiting = 0; // Safety: drop after too many frames
 	};
 
@@ -676,7 +680,7 @@ private:
 	/** Renders per camera; see ERammsCaptureMode. Defaults to the two-render
 	 *  mode, which is the existing behaviour and the only one that can produce
 	 *  motion vectors. */
-	ERammsCaptureMode CaptureMode = ERammsCaptureMode::ColorPlusDepthMotion;
+	ERammsCaptureMode CaptureMode = ERammsCaptureMode::SingleCaptureColorDepth;
 
 	/**
 	 * Which image the colour cameras capture.
@@ -698,7 +702,13 @@ private:
 	TEnumAsByte<ESceneCaptureSource> ColorCaptureSource = SCS_FinalColorLDR;
 
 	/** True when one render per camera supplies both planes. */
+	/** True when the colour capture also carries depth in its alpha, so there is
+	 *  no separate depth camera. */
 	bool IsSingleCaptureMode() const { return CaptureMode == ERammsCaptureMode::SingleCaptureColorDepth; }
+
+	/** Create the SCS_SceneColorSceneDepth capture for a camera, used only by
+	 *  TonemappedColorPlusDepth. */
+	void SetupDepthCamera(UIntrinsicSceneCaptureComponent2D* RgbCamera);
 
 	/** Last capture duration (for statistics) */
 	float LastCaptureDurationMs = 0.0f;
@@ -715,4 +725,21 @@ private:
 
 	/** Map of cameras to their depth+motion capture components */
 	TMap<TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D>, TWeakObjectPtr<USceneCaptureComponent2D>> DmvCameras;
+
+	/**
+	 * The depth capture, in TonemappedColorPlusDepth only.
+	 *
+	 * SCS_SceneColorSceneDepth, exactly like the single-capture path, so the two
+	 * modes cannot disagree about what a distance is. In SingleCaptureColorDepth
+	 * there is no entry here: the colour camera IS the depth camera.
+	 *
+	 * Separate from DmvCameras because depth and motion are no longer the same
+	 * pass. They were, and that coupling is what hid the fact that the motion
+	 * pass never produced usable depth: its SceneDepth lookup returned something
+	 * that correlated with scene luminance (+0.73) rather than with distance
+	 * (-0.11), while its velocity output was fine all along.
+	 */
+	TMap<TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D>, TWeakObjectPtr<USceneCaptureComponent2D>> DepthCameras;
+
+	TMap<TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D>, TWeakObjectPtr<UTextureRenderTarget2D>> DepthRenderTargets;
 };

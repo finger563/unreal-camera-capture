@@ -111,6 +111,8 @@ void UCameraCaptureSubsystem::Deinitialize()
 	UsedActorNames.Empty();
 	DmvRenderTargets.Empty();
 	DmvCameras.Empty();
+	DepthCameras.Empty();
+	DepthRenderTargets.Empty();
 
 	Super::Deinitialize();
 
@@ -191,8 +193,12 @@ void UCameraCaptureSubsystem::RegisterCamera(UIntrinsicSceneCaptureComponent2D* 
 	RegisteredCameras.Add(Camera);
 	CameraIDMap.Add(Camera, CameraID);
 
-	// Create DMV camera if depth/motion capture is enabled
-	if ((bCaptureDepth || bCaptureMotionVectors) && DmvCaptureMaterialBase)
+	// Depth and motion are separate passes now, each created only if asked for.
+	if (bCaptureDepth)
+	{
+		SetupDepthCamera(Camera);
+	}
+	if (bCaptureMotionVectors && DmvCaptureMaterialBase)
 	{
 		SetupDmvCamera(Camera);
 	}
@@ -200,26 +206,106 @@ void UCameraCaptureSubsystem::RegisterCamera(UIntrinsicSceneCaptureComponent2D* 
 	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Registered camera: %s"), *CameraID.ToString());
 }
 
+void UCameraCaptureSubsystem::SetupDepthCamera(UIntrinsicSceneCaptureComponent2D* RgbCamera)
+{
+	// Only the two-render mode has one. In SingleCaptureColorDepth the colour
+	// camera already captures SCS_SceneColorSceneDepth and its alpha IS the depth.
+	if (IsSingleCaptureMode() || !RgbCamera)
+	{
+		return;
+	}
+	if (DepthCameras.Contains(RgbCamera))
+	{
+		return;
+	}
+
+	const FCameraIntrinsics DepthIntrinsics = RgbCamera->GetActiveDepthIntrinsics();
+	const int32				Width = DepthIntrinsics.ImageWidth;
+	const int32				Height = DepthIntrinsics.ImageHeight;
+	if (Width < 1 || Height < 1)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] %s has invalid depth intrinsics %dx%d; no depth camera made"),
+			*RgbCamera->GetName(), Width, Height);
+		return;
+	}
+
+	const FString					   DepthName = RgbCamera->GetName() + TEXT("_depth");
+	UIntrinsicSceneCaptureComponent2D* DepthCamera = NewObject<UIntrinsicSceneCaptureComponent2D>(
+		RgbCamera->GetOwner(), RgbCamera->GetClass(), FName(*DepthName), RF_Transient, RgbCamera);
+	if (!DepthCamera)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Failed to create depth camera for %s"), *RgbCamera->GetName());
+		return;
+	}
+
+	// Separate depth calibration has to be applied BEFORE RegisterComponent,
+	// which triggers BeginPlay and ApplyIntrinsics.
+	if (RgbCamera->HasSeparateDepthIntrinsics())
+	{
+		DepthCamera->bUseDepthIntrinsics = false;
+		DepthCamera->bUseIntrinsicsAsset = RgbCamera->bUseDepthIntrinsicsAsset;
+		DepthCamera->IntrinsicsAsset = RgbCamera->DepthIntrinsicsAsset;
+		DepthCamera->InlineIntrinsics = RgbCamera->DepthInlineIntrinsics;
+	}
+
+	DepthCamera->SetupAttachment(RgbCamera);
+	if (RgbCamera->bUseDepthSensorOffset)
+	{
+		DepthCamera->SetRelativeLocation(RgbCamera->DepthSensorOffset.GetLocation());
+		DepthCamera->SetRelativeRotation(RgbCamera->DepthSensorOffset.GetRotation().Rotator());
+		DepthCamera->SetRelativeScale3D(RgbCamera->DepthSensorOffset.GetScale3D());
+	}
+	else
+	{
+		DepthCamera->SetRelativeLocation(FVector::ZeroVector);
+		DepthCamera->SetRelativeRotation(FRotator::ZeroRotator);
+	}
+
+	DepthCamera->bCaptureEveryFrame = false;
+	DepthCamera->bCaptureOnMovement = false;
+	DepthCamera->bAlwaysPersistRenderingState = true;
+	DepthCamera->bDrawFrustumInGame = false;
+	DepthCamera->bDrawFrustumInEditor = false;
+
+	// The whole reason this camera exists. Not a post-process material reading
+	// SceneDepth -- that is what the motion pass did, and its depth tracked scene
+	// luminance rather than distance. This reads the depth buffer through the
+	// engine's own path, which is the one measured to produce centimetres.
+	DepthCamera->CaptureSource = SCS_SceneColorSceneDepth;
+
+	// Alpha holds a distance, so the target cannot be 8-bit, and a half carries
+	// roughly 8 cm of error at 100 m.
+	UTextureRenderTarget2D* DepthRT = NewObject<UTextureRenderTarget2D>(this);
+	DepthRT->RenderTargetFormat = RTF_RGBA32f;
+	DepthRT->InitAutoFormat(Width, Height);
+	DepthRT->UpdateResourceImmediate(true);
+	DepthCamera->TextureTarget = DepthRT;
+
+	DepthCamera->RegisterComponent();
+	DepthCameras.Add(RgbCamera, DepthCamera);
+	DepthRenderTargets.Add(RgbCamera, DepthRT);
+
+	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Created depth camera '%s' (%dx%d, SceneColorSceneDepth)"),
+		*DepthName, Width, Height);
+}
+
 void UCameraCaptureSubsystem::SetupDmvCamera(UIntrinsicSceneCaptureComponent2D* RgbCamera)
 {
-	if (IsSingleCaptureMode())
+	// Motion no longer depends on how colour and depth are captured -- that
+	// coupling is what made motion impossible in the one-render mode and what
+	// hid the fact that this pass never produced usable depth. Either mode can
+	// have it; it costs its own render either way.
+	if (IsSingleCaptureMode() && RgbCamera && RgbCamera->HasSeparateDepthIntrinsics())
 	{
-		// The whole point of this mode is that there is no second camera and so
-		// no second render. Depth comes out of the colour capture's alpha.
-		if (RgbCamera && RgbCamera->HasSeparateDepthIntrinsics())
-		{
-			UE_LOG(LogTemp, Warning,
-				TEXT("[CameraCaptureSubsystem] %s has separate depth intrinsics, but single-capture mode takes both planes ")
-					TEXT("from one render target and so one resolution; the depth intrinsics are ignored. Use ")
-						TEXT("ColorPlusDepthMotion if the depth camera needs its own resolution."),
-				*RgbCamera->GetName());
-		}
-		if (bCaptureMotionVectors)
-		{
-			UE_LOG(LogTemp, Warning,
-				TEXT("[CameraCaptureSubsystem] Motion vectors were requested, but single-capture mode has no DMV pass to ")
-					TEXT("produce them; none will be written."));
-		}
+		UE_LOG(LogTemp, Warning,
+			TEXT("[CameraCaptureSubsystem] %s has separate depth intrinsics, but SingleCaptureColorDepth takes colour and ")
+				TEXT("depth from one render target and so one resolution; they are ignored. Use ")
+					TEXT("TonemappedColorPlusDepth if the depth camera needs its own resolution."),
+			*RgbCamera->GetName());
+	}
+
+	if (!bCaptureMotionVectors)
+	{
 		return;
 	}
 
@@ -381,6 +467,16 @@ void UCameraCaptureSubsystem::UnregisterCamera(UIntrinsicSceneCaptureComponent2D
 		DmvCameras.Remove(Camera);
 		DmvRenderTargets.Remove(Camera);
 
+		if (TWeakObjectPtr<USceneCaptureComponent2D>* DepthCameraPtr = DepthCameras.Find(Camera))
+		{
+			if (USceneCaptureComponent2D* DepthCamera = DepthCameraPtr->Get())
+			{
+				DepthCamera->DestroyComponent();
+			}
+		}
+		DepthCameras.Remove(Camera);
+		DepthRenderTargets.Remove(Camera);
+
 		CameraIDMap.Remove(Camera);
 	}
 }
@@ -535,8 +631,17 @@ void UCameraCaptureSubsystem::ReconfigureCamerasForCaptureMode()
 					Dmv->DestroyComponent();
 				}
 			}
-			DmvCameras.Remove(Camera);
-			DmvRenderTargets.Remove(Camera);
+			// The depth camera is what the mode actually controls now; the motion
+			// pass is independent and is left alone.
+			if (TWeakObjectPtr<USceneCaptureComponent2D>* DepthPtr = DepthCameras.Find(Camera))
+			{
+				if (USceneCaptureComponent2D* DepthCam = DepthPtr->Get())
+				{
+					DepthCam->DestroyComponent();
+				}
+			}
+			DepthCameras.Remove(Camera);
+			DepthRenderTargets.Remove(Camera);
 
 			// Alpha has to hold a distance in centimetres. An 8-bit target
 			// cannot, and keeping one would have produced depth quantised to
@@ -564,11 +669,12 @@ void UCameraCaptureSubsystem::ReconfigureCamerasForCaptureMode()
 					*Camera->GetName());
 			}
 		}
-		else if (!DmvCameras.Contains(Camera) && (bCaptureDepth || bCaptureMotionVectors) && DmvCaptureMaterialBase)
+		else if (bCaptureDepth)
 		{
-			// Depth and motion come from the DMV camera in this mode, and a
-			// camera registered under single capture never got one.
-			SetupDmvCamera(Camera);
+			// The two-render mode needs its own depth capture, and a camera
+			// registered under single capture never got one. Motion is left
+			// alone: it is the same pass in either mode.
+			SetupDepthCamera(Camera);
 		}
 
 		// Format, capture source and size are all settled here, and a null
@@ -663,10 +769,44 @@ void UCameraCaptureSubsystem::KickAllCaptures()
 			Pending.bHasRgb = true;
 		}
 
-		// --- Kick DMV capture + enqueue async readback ---
-		// Skipped entirely in single-capture mode: that is the render this mode
-		// exists to avoid.
-		if (!IsSingleCaptureMode() && (bCaptureDepth || bCaptureMotionVectors))
+		// --- Kick the depth capture, in the two-render mode only ---
+		// Its own camera, SCS_SceneColorSceneDepth, exactly the engine path the
+		// single-capture mode uses -- so the two modes cannot disagree about what
+		// a distance is. Depth no longer comes from the motion pass, whose
+		// SceneDepth lookup tracked scene luminance rather than distance.
+		if (!IsSingleCaptureMode() && bCaptureDepth)
+		{
+			TWeakObjectPtr<USceneCaptureComponent2D>* DepthCameraPtr = DepthCameras.Find(Camera);
+			if (DepthCameraPtr && DepthCameraPtr->IsValid())
+			{
+				USceneCaptureComponent2D* DepthCamera = DepthCameraPtr->Get();
+				DepthCamera->CaptureScene();
+
+				if (UTextureRenderTarget2D* DepthRT = DepthCamera->TextureTarget)
+				{
+					Pending.DepthReadback.Width = DepthRT->SizeX;
+					Pending.DepthReadback.Height = DepthRT->SizeY;
+					Pending.DepthReadback.PixelFormat = GetPixelFormatFromRenderTargetFormat(DepthRT->RenderTargetFormat);
+					// Alpha, same as the single-capture path.
+					Pending.DepthReadback.bDepthInAlpha = true;
+
+					// Depth keeps its own dimensions all the way through. With
+					// separate depth intrinsics these differ from the colour ones,
+					// and everything downstream needs to know which is which.
+					Pending.Metadata.DepthWidth = DepthRT->SizeX;
+					Pending.Metadata.DepthHeight = DepthRT->SizeY;
+
+					EnqueueAsyncReadback(DepthRT, Pending.DepthReadback.Readback, Pending.DepthReadback.CopyIssued);
+					Pending.bHasDepth = true;
+				}
+			}
+		}
+
+		// --- Kick the motion/ID pass, independent of how colour and depth came ---
+		// This is the decoupling: motion used to ride on the depth pass, which is
+		// why it could only exist in the two-render mode. It is its own render
+		// now and either mode can have it.
+		if (bCaptureMotionVectors)
 		{
 			TWeakObjectPtr<USceneCaptureComponent2D>* DmvCameraPtr = DmvCameras.Find(Camera);
 			if (DmvCameraPtr && DmvCameraPtr->IsValid())
@@ -683,12 +823,6 @@ void UCameraCaptureSubsystem::KickAllCaptures()
 					// DMV target this subsystem creates is RGBA32f, but a camera
 					// can arrive with one somebody else made.
 					Pending.DmvReadback.PixelFormat = GetPixelFormatFromRenderTargetFormat(DmvRT->RenderTargetFormat);
-
-					// Depth keeps its own dimensions all the way through. With
-					// separate depth intrinsics these differ from the colour ones,
-					// and everything downstream needs to know which is which.
-					Pending.Metadata.DepthWidth = DmvRT->SizeX;
-					Pending.Metadata.DepthHeight = DmvRT->SizeY;
 
 					EnqueueAsyncReadback(DmvRT, Pending.DmvReadback.Readback, Pending.DmvReadback.CopyIssued);
 					Pending.bHasDmv = true;
@@ -889,8 +1023,9 @@ void UCameraCaptureSubsystem::HarvestReadyReadbacks()
 		// Check if ALL readbacks for this camera are ready (non-blocking poll)
 		const bool bRgbReady = !Pending.bHasRgb || !Pending.RgbReadback.Readback || Pending.RgbReadback.IsReadyForHarvest();
 		const bool bDmvReady = !Pending.bHasDmv || !Pending.DmvReadback.Readback || Pending.DmvReadback.IsReadyForHarvest();
+		const bool bDepthReady = !Pending.bHasDepth || !Pending.DepthReadback.Readback || Pending.DepthReadback.IsReadyForHarvest();
 
-		if (bRgbReady && bDmvReady)
+		if (bRgbReady && bDmvReady && bDepthReady)
 		{
 			// The copy out of the staging buffer has to happen on the RENDER
 			// thread: FRHIGPUTextureReadback::Lock goes through
@@ -904,6 +1039,7 @@ void UCameraCaptureSubsystem::HarvestReadyReadbacks()
 			TSharedRef<FCaptureData>	 DataRef = MakeShared<FCaptureData>(MoveTemp(Pending.Metadata));
 			TSharedPtr<FPendingReadback> RgbRb;
 			TSharedPtr<FPendingReadback> DmvRb;
+			TSharedPtr<FPendingReadback> DepthRb;
 			if (Pending.bHasRgb && Pending.RgbReadback.Readback)
 			{
 				RgbRb = MakeShared<FPendingReadback>(MoveTemp(Pending.RgbReadback));
@@ -911,6 +1047,10 @@ void UCameraCaptureSubsystem::HarvestReadyReadbacks()
 			if (Pending.bHasDmv && Pending.DmvReadback.Readback)
 			{
 				DmvRb = MakeShared<FPendingReadback>(MoveTemp(Pending.DmvReadback));
+			}
+			if (Pending.bHasDepth && Pending.DepthReadback.Readback)
+			{
+				DepthRb = MakeShared<FPendingReadback>(MoveTemp(Pending.DepthReadback));
 			}
 			PendingCaptures.RemoveAt(i);
 
@@ -920,7 +1060,7 @@ void UCameraCaptureSubsystem::HarvestReadyReadbacks()
 
 			ENQUEUE_RENDER_COMMAND(CameraCaptureHarvestReadbacks)
 			(
-				[WeakThis, DataRef, RgbRb, DmvRb](FRHICommandListImmediate& RHICmdList) {
+				[WeakThis, DataRef, RgbRb, DmvRb, DepthRb](FRHICommandListImmediate& RHICmdList) {
 					if (RgbRb.IsValid())
 					{
 						HarvestRgbReadback(*RgbRb, *DataRef);
@@ -929,10 +1069,16 @@ void UCameraCaptureSubsystem::HarvestReadyReadbacks()
 					{
 						HarvestDmvReadback(*DmvRb, *DataRef);
 					}
+					// After the motion harvest, which no longer writes depth:
+					// this is where depth comes from in the two-render mode.
+					if (DepthRb.IsValid())
+					{
+						HarvestRgbReadback(*DepthRb, *DataRef);
+					}
 
 					// Back to the game thread to publish: listeners expect it,
 					// and the readback pool is not synchronised.
-					AsyncTask(ENamedThreads::GameThread, [WeakThis, DataRef, RgbRb, DmvRb]() {
+					AsyncTask(ENamedThreads::GameThread, [WeakThis, DataRef, RgbRb, DmvRb, DepthRb]() {
 						UCameraCaptureSubsystem* Self = WeakThis.Get();
 						if (!Self)
 						{
@@ -963,6 +1109,10 @@ void UCameraCaptureSubsystem::HarvestReadyReadbacks()
 						if (DmvRb.IsValid())
 						{
 							Self->ReleaseReadback(MoveTemp(DmvRb->Readback), DmvRb->GetShape());
+						}
+						if (DepthRb.IsValid())
+						{
+							Self->ReleaseReadback(MoveTemp(DepthRb->Readback), DepthRb->GetShape());
 						}
 					});
 				});
@@ -1080,8 +1230,19 @@ void UCameraCaptureSubsystem::HarvestRgbReadback(FPendingReadback& Readback, FCa
 	}
 
 	const int32 NumPixels = Width * Height;
-	OutData.ImageData.SetNumUninitialized(NumPixels);
-	FColor* RESTRICT Dst = OutData.ImageData.GetData();
+	// A depth-only capture still walks the buffer, but into a scratch row rather
+	// than over the colour plane another capture already filled.
+	static thread_local TArray<FColor> DiscardRow;
+	if (Readback.bDepthOnly)
+	{
+		DiscardRow.SetNumUninitialized(Width);
+	}
+	else
+	{
+		OutData.ImageData.SetNumUninitialized(NumPixels);
+	}
+	FColor* RESTRICT Dst = Readback.bDepthOnly ? DiscardRow.GetData() : OutData.ImageData.GetData();
+	const int32		 DstStride = Readback.bDepthOnly ? 0 : Width;
 
 	// Single-capture mode: alpha is scene depth in centimetres, straight from
 	// the engine's SCS_SceneColorSceneDepth pass, so this one readback fills
@@ -1115,7 +1276,7 @@ void UCameraCaptureSubsystem::HarvestRgbReadback(FPendingReadback& Readback, FCa
 					}
 					DepthDst += Width;
 				}
-				Dst += Width;
+				Dst += DstStride;
 				SrcRow += RowPitchInPixels;
 			}
 			break;
@@ -1140,7 +1301,7 @@ void UCameraCaptureSubsystem::HarvestRgbReadback(FPendingReadback& Readback, FCa
 					}
 					DepthDst += Width;
 				}
-				Dst += Width;
+				Dst += DstStride;
 				SrcRow += RowPitchInPixels;
 			}
 			break;
@@ -1227,16 +1388,19 @@ void UCameraCaptureSubsystem::HarvestDmvReadback(FPendingReadback& Readback, FCa
 	}
 
 	const int32 NumPixels = Width * Height;
-	OutData.DepthData.SetNumUninitialized(NumPixels);
 	OutData.MotionVectorData.SetNumUninitialized(NumPixels);
+	OutData.MotionWidth = Width;
+	OutData.MotionHeight = Height;
 
-	// These are the dimensions the depth arrays are actually in. Set them here as
-	// well as at kick time so a harvest is self-consistent even if the target was
-	// swapped underneath us between kick and resolve.
-	OutData.DepthWidth = Width;
-	OutData.DepthHeight = Height;
-
-	float* RESTRICT		DepthDst = OutData.DepthData.GetData();
+	// Motion ONLY. This pass used to publish depth from its red channel as well,
+	// and that depth was never a distance: measured against the engine's own
+	// SCS_SceneColorSceneDepth on the same scene it correlated -0.11 with true
+	// depth and +0.73 with scene luminance. Depth now comes from a capture that
+	// reads the depth buffer directly, in both modes, and this pass does the one
+	// thing it was always good at.
+	//
+	// The material still writes depth to R -- its layout changes with the
+	// motion/ID pass -- so R is simply not read.
 	FVector2D* RESTRICT MotionDst = OutData.MotionVectorData.GetData();
 
 	// DMV layout: R=Depth, G=MotionX, B=MotionY, A=1
@@ -1248,10 +1412,8 @@ void UCameraCaptureSubsystem::HarvestDmvReadback(FPendingReadback& Readback, FCa
 			for (int32 x = 0; x < Width; x++)
 			{
 				const FLinearColor& Pixel = SrcRow[x];
-				DepthDst[x] = Pixel.R;
 				MotionDst[x] = FVector2D(Pixel.G, Pixel.B);
 			}
-			DepthDst += Width;
 			MotionDst += Width;
 			SrcRow += RowPitchInPixels;
 		}
@@ -1264,10 +1426,8 @@ void UCameraCaptureSubsystem::HarvestDmvReadback(FPendingReadback& Readback, FCa
 			for (int32 x = 0; x < Width; x++)
 			{
 				const FFloat16Color& Pixel = SrcRow[x];
-				DepthDst[x] = Pixel.R.GetFloat();
 				MotionDst[x] = FVector2D(Pixel.G.GetFloat(), Pixel.B.GetFloat());
 			}
-			DepthDst += Width;
 			MotionDst += Width;
 			SrcRow += RowPitchInPixels;
 		}
@@ -1330,6 +1490,22 @@ FCaptureData UCameraCaptureSubsystem::BuildCaptureMetadata(UIntrinsicSceneCaptur
 }
 
 UTextureRenderTarget2D* UCameraCaptureSubsystem::GetDepthRenderTarget(UIntrinsicSceneCaptureComponent2D* Camera) const
+{
+	if (!Camera)
+	{
+		return nullptr;
+	}
+	// The DEPTH capture's target, which is a different pass from motion now. Null
+	// in SingleCaptureColorDepth, where depth rides in the colour target's alpha
+	// and there is no second target to hand back.
+	if (const TWeakObjectPtr<UTextureRenderTarget2D>* Found = DepthRenderTargets.Find(Camera))
+	{
+		return Found->Get();
+	}
+	return nullptr;
+}
+
+UTextureRenderTarget2D* UCameraCaptureSubsystem::GetMotionRenderTarget(UIntrinsicSceneCaptureComponent2D* Camera) const
 {
 	if (!Camera)
 	{
@@ -1473,7 +1649,12 @@ bool UCameraCaptureSubsystem::WriteEXRFile_Static(const FString& FilePath, const
 	// the feature looked like it worked and silently produced nothing.
 	const bool bHaveRgb = bCaptureRGB && Data.ImageData.Num() == NumPixels;
 	const bool bHaveDepth = bCaptureDepth && Data.DepthData.Num() == DepthPixels;
-	const bool bHaveMotion = bCaptureMotionVectors && Data.MotionVectorData.Num() == DepthPixels;
+	// Motion against its OWN grid. It used to be checked against the depth grid,
+	// which was fine only while the two came from the same pass.
+	const int32 MotionWidth = Data.MotionWidth > 0 ? Data.MotionWidth : DepthWidth;
+	const int32 MotionHeight = Data.MotionHeight > 0 ? Data.MotionHeight : DepthHeight;
+	const int32 MotionPixelCount = MotionWidth * MotionHeight;
+	const bool	bHaveMotion = bCaptureMotionVectors && Data.MotionVectorData.Num() == MotionPixelCount;
 
 	if (bCaptureRGB && !bHaveRgb && Data.ImageData.Num() > 0)
 	{
@@ -1549,15 +1730,15 @@ bool UCameraCaptureSubsystem::WriteEXRFile_Static(const FString& FilePath, const
 		if (bHaveMotion)
 		{
 			TArray64<FLinearColor> MotionPixels;
-			MotionPixels.SetNumUninitialized(DepthPixels);
+			MotionPixels.SetNumUninitialized(MotionPixelCount);
 			FLinearColor* RESTRICT	  MotionOut = MotionPixels.GetData();
 			const FVector2D* RESTRICT SrcMotion = Data.MotionVectorData.GetData();
-			for (int32 i = 0; i < DepthPixels; i++)
+			for (int32 i = 0; i < MotionPixelCount; i++)
 			{
 				MotionOut[i] = FLinearColor(static_cast<float>(SrcMotion[i].X), static_cast<float>(SrcMotion[i].Y), 0.0f, 0.0f);
 			}
 			const FString MotionPath = FilePath.Replace(TEXT(".exr"), TEXT("_motion.exr"));
-			CameraCaptureUtils::WriteEXRPixels(MotionPath, MoveTemp(MotionPixels), DepthWidth, DepthHeight);
+			CameraCaptureUtils::WriteEXRPixels(MotionPath, MoveTemp(MotionPixels), MotionWidth, MotionHeight);
 		}
 
 		return true;
@@ -1603,16 +1784,16 @@ bool UCameraCaptureSubsystem::WriteEXRFile_Static(const FString& FilePath, const
 	if (bHaveMotion)
 	{
 		TArray64<FLinearColor> MotionPixels;
-		MotionPixels.SetNumUninitialized(DepthPixels);
+		MotionPixels.SetNumUninitialized(MotionPixelCount);
 		FLinearColor* RESTRICT	  MotionOut = MotionPixels.GetData();
 		const FVector2D* RESTRICT SrcMotion = Data.MotionVectorData.GetData();
-		for (int32 i = 0; i < DepthPixels; i++)
+		for (int32 i = 0; i < MotionPixelCount; i++)
 		{
 			MotionOut[i] = FLinearColor(static_cast<float>(SrcMotion[i].X), static_cast<float>(SrcMotion[i].Y), 0.0f, 0.0f);
 		}
 
 		const FString MotionPath = FilePath.Replace(TEXT(".exr"), TEXT("_motion.exr"));
-		if (!CameraCaptureUtils::WriteEXRPixels(MotionPath, MoveTemp(MotionPixels), DepthWidth, DepthHeight))
+		if (!CameraCaptureUtils::WriteEXRPixels(MotionPath, MoveTemp(MotionPixels), MotionWidth, MotionHeight))
 		{
 			UE_LOG(LogTemp, Warning, TEXT("[CameraCaptureSubsystem] Failed to write motion EXR: %s"), *MotionPath);
 		}
@@ -1678,6 +1859,14 @@ bool UCameraCaptureSubsystem::WriteMetadataFile_Static(const FString& FilePath, 
 	// Which files this frame produced, so a reader does not have to guess
 	// whether colour is in the EXR's RGB channels or beside it as a PNG.
 	const bool bSeparate = Format == ERammsCaptureColorFormat::SeparatePNGAndEXR;
+
+	// Motion has its own grid since it became its own pass; a reader that assumed
+	// depth's dimensions would reshape it wrongly whenever the two differ.
+	if (Data.MotionWidth > 0 && Data.MotionHeight > 0)
+	{
+		JsonObject->SetNumberField(TEXT("motion_width"), Data.MotionWidth);
+		JsonObject->SetNumberField(TEXT("motion_height"), Data.MotionHeight);
+	}
 
 	if (Data.DepthWidth > 0 && Data.DepthHeight > 0)
 	{

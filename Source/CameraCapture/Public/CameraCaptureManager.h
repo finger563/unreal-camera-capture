@@ -74,7 +74,7 @@ public:
 	 *  halves it, at the price of motion vectors and of depth sharing the colour
 	 *  resolution; see ERammsCaptureMode. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (DisplayName = "Capture Mode"))
-	ERammsCaptureMode CaptureMode = ERammsCaptureMode::ColorPlusDepthMotion;
+	ERammsCaptureMode CaptureMode = ERammsCaptureMode::SingleCaptureColorDepth;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (DisplayName = "Capture Motion Vectors"))
 	bool bCaptureMotionVectors = true;
