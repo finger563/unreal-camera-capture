@@ -290,6 +290,9 @@ void UCaptureComponent::StartCapturing()
 
 void UCaptureComponent::StopCapturing()
 {
+	// Collect the frame already armed before the gate closes. In timer mode
+	// CaptureData may not be called again for a long time, or at all.
+	EnqueueArmedReadbacks();
 	ShouldCaptureData = false;
 }
 
@@ -518,17 +521,21 @@ void UCaptureComponent::UpdateTransformFile()
 
 void UCaptureComponent::CaptureData()
 {
+	// Read back the capture armed LAST time FIRST, and before the gate below.
+	//
+	// Two reasons it runs here. The copies used to be enqueued in the same tick
+	// as CaptureSceneDeferred, which only marks a camera to render later in the
+	// frame, so the copy ran ahead of the render it was meant to collect and
+	// returned whatever the target held before. And behind the ShouldCaptureData
+	// return an armed frame was stranded: capture stopping left its last frame
+	// unread, and resuming later read the THEN-current target under the OLD
+	// frame index. A frame that was armed was really captured, so it is drained
+	// whether or not capture is still on.
+	EnqueueArmedReadbacks();
+
 	// if we're not capturing data, just return
 	if (!ShouldCaptureData)
 		return;
-
-	// Read back the capture armed LAST time, before arming another. The copies
-	// used to be enqueued in the same tick as CaptureSceneDeferred, which only
-	// marks a camera to render later in the frame -- so the copy ran ahead of the
-	// render it was meant to collect and returned whatever the target held
-	// before. The pre-readback code avoided this by reading on the next tick;
-	// this keeps that ordering while keeping the copies asynchronous.
-	EnqueueArmedReadbacks();
 
 	// Start deferred capture of the scene (RGB)
 	for (auto camera : RgbCameras)
@@ -546,7 +553,30 @@ void UCaptureComponent::CaptureData()
 	if (!ShouldSaveData)
 	{
 		ArmedFrameIndex = INDEX_NONE;
+		ArmedCameraStates.Reset();
 		return;
+	}
+
+	// Snapshot each camera NOW, beside the render it describes. By the time the
+	// pixels land the camera has moved on.
+	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+	ArmedCameraStates.SetNum(RgbCameras.Num());
+	for (int32 i = 0; i < RgbCameras.Num(); i++)
+	{
+		FArmedCameraState& State = ArmedCameraStates[i];
+		State = FArmedCameraState();
+		USceneCaptureComponent2D* Camera = RgbCameras[i];
+		if (!Camera)
+		{
+			continue;
+		}
+		State.Transform = Camera->GetComponentTransform();
+		State.Timestamp = Now;
+		if (UIntrinsicSceneCaptureComponent2D* Intrinsic = Cast<UIntrinsicSceneCaptureComponent2D>(Camera))
+		{
+			State.Intrinsics = Intrinsic->GetActiveIntrinsics();
+			State.bValid = true;
+		}
 	}
 
 	ArmedFrameIndex = ImageIndex++;
@@ -575,6 +605,10 @@ void UCaptureComponent::EnqueueArmedReadbacks()
 		FPendingFrame Pending;
 		Pending.CameraIndex = i;
 		Pending.FrameIndex = FrameIndex;
+		if (ArmedCameraStates.IsValidIndex(i))
+		{
+			Pending.State = ArmedCameraStates[i];
+		}
 
 		const bool bRgbQueued = CameraCaptureUtils::EnqueueReadback(RgbTextures[i], Pending.Rgb);
 		const bool bDmvQueued = CameraCaptureUtils::EnqueueReadback(DmvTextures[i], Pending.Dmv);
@@ -623,12 +657,13 @@ void UCaptureComponent::HarvestAndWriteReadyFrames()
 		const bool bOk = !Pending.Rgb.HasFailed() && !Pending.Dmv.HasFailed()
 			&& Pending.Rgb.Pixels.IsValid() && Pending.Dmv.Pixels.IsValid();
 
-		const int32 CameraIndex = Pending.CameraIndex;
-		const int32 FrameIndex = Pending.FrameIndex;
-		const int32 RgbW = Pending.Rgb.Width;
-		const int32 RgbH = Pending.Rgb.Height;
-		const int32 DmvW = Pending.Dmv.Width;
-		const int32 DmvH = Pending.Dmv.Height;
+		const int32				CameraIndex = Pending.CameraIndex;
+		const int32				FrameIndex = Pending.FrameIndex;
+		const FArmedCameraState State = Pending.State;
+		const int32				RgbW = Pending.Rgb.Width;
+		const int32				RgbH = Pending.Rgb.Height;
+		const int32				DmvW = Pending.Dmv.Width;
+		const int32				DmvH = Pending.Dmv.Height;
 
 		// Keep the pixel buffers alive past the array entry we are about to drop.
 		TSharedPtr<TArray<FLinearColor>> RgbPixels = Pending.Rgb.Pixels;
@@ -637,12 +672,12 @@ void UCaptureComponent::HarvestAndWriteReadyFrames()
 
 		if (bOk)
 		{
-			WriteFrame(CameraIndex, FrameIndex, *RgbPixels, *DmvPixels, RgbW, RgbH, DmvW, DmvH);
+			WriteFrame(CameraIndex, FrameIndex, State, *RgbPixels, *DmvPixels, RgbW, RgbH, DmvW, DmvH);
 		}
 	}
 }
 
-void UCaptureComponent::WriteFrame(int32 CameraIndex, int32 FrameIndex,
+void UCaptureComponent::WriteFrame(int32 CameraIndex, int32 FrameIndex, const FArmedCameraState& State,
 	const TArray<FLinearColor>& rgb_data, const TArray<FLinearColor>& dmv_data,
 	int32 RgbW, int32 RgbH, int32 DmvW, int32 DmvH)
 {
@@ -654,11 +689,18 @@ void UCaptureComponent::WriteFrame(int32 CameraIndex, int32 FrameIndex,
 	}
 	auto rgb = RgbCameras[CameraIndex];
 
-	// Get camera intrinsics
-	UIntrinsicSceneCaptureComponent2D* IntrinsicCamera = Cast<UIntrinsicSceneCaptureComponent2D>(rgb);
-	FCameraIntrinsics				   Intrinsics;
-	if (IntrinsicCamera)
+	// Intrinsics as they were when this frame was armed, not as they are now:
+	// the snapshot is the whole point, since the pixels are several frames old by
+	// the time they land here.
+	FCameraIntrinsics Intrinsics;
+	if (State.bValid)
 	{
+		Intrinsics = State.Intrinsics;
+	}
+	else if (UIntrinsicSceneCaptureComponent2D* IntrinsicCamera = Cast<UIntrinsicSceneCaptureComponent2D>(rgb))
+	{
+		// No snapshot: a frame armed before this code existed, or a camera added
+		// mid-flight. Current values are better than none.
 		Intrinsics = IntrinsicCamera->GetActiveIntrinsics();
 	}
 	else
@@ -755,7 +797,10 @@ void UCaptureComponent::WriteFrame(int32 CameraIndex, int32 FrameIndex,
 	// Write metadata JSON
 	FString ActorPath = GetOwner() ? GetOwner()->GetPathName() : TEXT("");
 	FString LevelName = GetWorld() ? GetWorld()->GetName() : TEXT("");
-	float	Timestamp = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+	// Likewise the time and the pose: taken when the frame was armed.
+	const float		 Timestamp = State.bValid ? State.Timestamp : (GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f);
+	const FTransform CapturedTransform = State.Transform;
 
-	CameraCaptureUtils::WriteMetadataFile(metadata_filename, rgb, Intrinsics, FrameIndex, Timestamp, ActorPath, LevelName);
+	CameraCaptureUtils::WriteMetadataFile(metadata_filename, rgb, Intrinsics, FrameIndex, Timestamp, ActorPath, LevelName,
+		State.bValid ? &CapturedTransform : nullptr);
 }

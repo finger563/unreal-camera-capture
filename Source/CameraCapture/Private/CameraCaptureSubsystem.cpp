@@ -550,6 +550,19 @@ void UCameraCaptureSubsystem::ReconfigureCamerasForCaptureMode()
 					*Camera->GetName());
 				Camera->TextureTarget = nullptr;
 			}
+			else if (Existing && Existing->RenderTargetFormat == RTF_RGBA16f)
+			{
+				// Kept, not replaced. A half can hold a distance -- just coarsely,
+				// about 8 cm of error at 100 m -- and the harvest accepts
+				// PF_FloatRGBA for exactly that reason. Destroying a target
+				// somebody configured by hand is the worse failure, so this says
+				// what the cost is instead of silently charging it.
+				UE_LOG(LogTemp, Warning,
+					TEXT("[CameraCaptureSubsystem] %s has an RGBA16f render target; single-capture mode keeps it, but ")
+						TEXT("half-float alpha carries roughly 8 cm of depth error at 100 m. Use RGBA32f, or let the ")
+							TEXT("subsystem create the target, for full precision."),
+					*Camera->GetName());
+			}
 		}
 		else if (!DmvCameras.Contains(Camera) && (bCaptureDepth || bCaptureMotionVectors) && DmvCaptureMaterialBase)
 		{

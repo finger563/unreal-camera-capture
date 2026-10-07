@@ -351,7 +351,8 @@ namespace CameraCaptureUtils
 		int32							  FrameNumber,
 		float							  Timestamp,
 		const FString&					  ActorPath,
-		const FString&					  LevelName)
+		const FString&					  LevelName,
+		const FTransform*				  CapturedTransform)
 	{
 		if (!Camera)
 		{
@@ -369,8 +370,11 @@ namespace CameraCaptureUtils
 		FString CameraId = Camera->GetOwner() ? Camera->GetOwner()->GetName() : TEXT("Unknown");
 		RootObject->SetStringField(TEXT("camera_id"), CameraId);
 
-		// World transform
-		FTransform CameraTransform = Camera->GetComponentTransform();
+		// World transform: the pose the frame was CAPTURED at, when the caller
+		// snapshotted one. Read off the live component here it describes wherever
+		// the camera has got to by the time the pixels landed, which for a moving
+		// camera is a different place.
+		const FTransform CameraTransform = CapturedTransform ? *CapturedTransform : Camera->GetComponentTransform();
 		RootObject->SetObjectField(TEXT("world_transform"), TransformToJsonObject(CameraTransform));
 
 		// Camera intrinsics

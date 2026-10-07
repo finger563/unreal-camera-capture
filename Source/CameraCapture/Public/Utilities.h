@@ -163,7 +163,8 @@ namespace CameraCaptureUtils
 		int32							  FrameNumber,
 		float							  Timestamp,
 		const FString&					  ActorPath = TEXT(""),
-		const FString&					  LevelName = TEXT(""));
+		const FString&					  LevelName = TEXT(""),
+		const FTransform*				  CapturedTransform = nullptr);
 
 	/**
 	 * Draw a camera frustum for visualization using projection matrix

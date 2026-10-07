@@ -191,8 +191,17 @@ enum class ERammsCaptureMode : uint8
 	ColorPlusDepthMotion UMETA(DisplayName = "Colour + depth/motion (2 renders)"),
 
 	/**
-	 * One render per camera, using SCS_SceneColorSceneDepth: HDR scene colour in
-	 * RGB and scene depth in alpha, straight from the engine.
+	 * One render per camera, using SCS_SceneColorSceneDepth: scene colour in RGB
+	 * and scene depth in alpha, straight from the engine.
+	 *
+	 * The render target is float, but the COLOUR plane is not delivered as
+	 * float: the harvest converts it through FColor, so what reaches
+	 * FCaptureData::ImageData is 8 bits per channel of linear scene colour --
+	 * which is a poor fit for linear values, since without a transfer curve the
+	 * quantisation falls almost entirely in the darks. Depth keeps its full float
+	 * precision; it is read out of alpha directly. Carrying colour as float would
+	 * mean widening FCaptureData, and every consumer of it, which has not been
+	 * done.
 	 *
 	 * Roughly halves the per-camera cost. Three consequences worth knowing:
 	 * motion vectors are not produced at all; colour is linear scene colour
