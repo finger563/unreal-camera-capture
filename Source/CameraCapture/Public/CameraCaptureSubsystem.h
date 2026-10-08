@@ -213,8 +213,12 @@ enum class ERammsCaptureMode : uint8
 	 * CaptureMode is a persisted UPROPERTY. An asset saved before the split
 	 * therefore loads as the mode closest to what it asked for -- two renders,
 	 * tone-mapped colour -- whether it resolves by value or falls back to 0 after
-	 * failing to find the old name. See the EnumRedirects entry in the project's
-	 * DefaultEngine.ini, which handles the name explicitly.
+	 * failing to find the old name. Config/BaseCameraCapture.ini ships an
+	 * EnumRedirects entry so the name resolves explicitly rather than relying on
+	 * that fallback. CoreRedirects are read from the engine config hierarchy,
+	 * which a plugin's own config is not guaranteed to reach, so a consuming
+	 * project that cares about the name should carry the same entry -- the
+	 * ordinals above are what make this safe without it.
 	 */
 	TonemappedColorPlusDepth = 0 UMETA(DisplayName = "Tone-mapped colour + depth, two renders"),
 
