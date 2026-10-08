@@ -200,27 +200,37 @@ UENUM(BlueprintType)
 enum class ERammsCaptureMode : uint8
 {
 	/**
-	 * One render. SCS_SceneColorSceneDepth gives linear scene colour in RGB and
-	 * scene depth in alpha, in centimetres, straight from the engine.
-	 *
-	 * The default, and the cheapest thing that produces both planes. Colour is
-	 * linear rather than tone-mapped -- the harvest sRGB-encodes it on the way to
-	 * 8 bits, so it reads correctly, but highlights clip because nothing rolls
-	 * them off.
-	 */
-	SingleCaptureColorDepth UMETA(DisplayName = "Colour + depth, one render"),
-
-	/**
 	 * Two renders: a tone-mapped colour capture, plus a second capture used only
 	 * for its depth alpha.
 	 *
 	 * For when colour appearance matters more than the render. The depth half is
-	 * identical to the mode above -- same engine path, same centimetres -- so the
-	 * two modes never disagree about distance. It is also the only mode in which
-	 * depth can have its own resolution, since the depth capture is its own
+	 * identical to the one-render mode -- same engine path, same centimetres --
+	 * so the two modes never disagree about distance. It is also the only mode in
+	 * which depth can have its own resolution, since the depth capture is its own
 	 * camera.
+	 *
+	 * Deliberately value 0: this replaced ColorPlusDepthMotion, which was 0, and
+	 * CaptureMode is a persisted UPROPERTY. An asset saved before the split
+	 * therefore loads as the mode closest to what it asked for -- two renders,
+	 * tone-mapped colour -- whether it resolves by value or falls back to 0 after
+	 * failing to find the old name. See the EnumRedirects entry in the project's
+	 * DefaultEngine.ini, which handles the name explicitly.
 	 */
-	TonemappedColorPlusDepth UMETA(DisplayName = "Tone-mapped colour + depth, two renders")
+	TonemappedColorPlusDepth = 0 UMETA(DisplayName = "Tone-mapped colour + depth, two renders"),
+
+	/**
+	 * One render. SCS_SceneColorSceneDepth gives linear scene colour in RGB and
+	 * scene depth in alpha, in centimetres, straight from the engine.
+	 *
+	 * The cheapest thing that produces both planes, and the default. Colour is
+	 * linear rather than tone-mapped -- the harvest sRGB-encodes it on the way to
+	 * 8 bits, so it reads correctly, but highlights clip because nothing rolls
+	 * them off.
+	 *
+	 * Keeps its original value of 1, so assets that already selected it still
+	 * select it.
+	 */
+	SingleCaptureColorDepth = 1 UMETA(DisplayName = "Colour + depth, one render")
 };
 /**
  * Capture statistics for monitoring performance
