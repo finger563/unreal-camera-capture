@@ -636,17 +636,12 @@ void UCameraCaptureSubsystem::ReconfigureCamerasForCaptureMode()
 
 		if (bSingle)
 		{
-			// The second camera is the cost this mode exists to avoid, so it
-			// goes rather than sitting idle holding an RGBA32f target.
-			if (TWeakObjectPtr<USceneCaptureComponent2D>* DmvPtr = DmvCameras.Find(Camera))
-			{
-				if (USceneCaptureComponent2D* Dmv = DmvPtr->Get())
-				{
-					Dmv->DestroyComponent();
-				}
-			}
-			// The depth camera is what the mode actually controls now; the motion
-			// pass is independent and is left alone.
+			// The depth camera is what the mode controls, and in this mode there
+			// is no second render: depth comes out of the colour target's alpha.
+			// The MOTION pass is independent of the mode and is left alone --
+			// tearing it down here stopped motion vectors for good, because its
+			// map entry stayed behind as a weak pointer that never resolved
+			// again.
 			if (TWeakObjectPtr<USceneCaptureComponent2D>* DepthPtr = DepthCameras.Find(Camera))
 			{
 				if (USceneCaptureComponent2D* DepthCam = DepthPtr->Get())
@@ -801,8 +796,14 @@ void UCameraCaptureSubsystem::KickAllCaptures()
 					Pending.DepthReadback.Width = DepthRT->SizeX;
 					Pending.DepthReadback.Height = DepthRT->SizeY;
 					Pending.DepthReadback.PixelFormat = GetPixelFormatFromRenderTargetFormat(DepthRT->RenderTargetFormat);
-					// Alpha, same as the single-capture path.
+					// Alpha, same as the single-capture path -- and ONLY alpha.
+					// Without bDepthOnly this readback's RGB is harvested too and
+					// overwrites ImageData after the real colour harvest, so the
+					// colour plane in this mode came from the depth camera's
+					// linear scene colour rather than the tone-mapped capture the
+					// mode exists to provide.
 					Pending.DepthReadback.bDepthInAlpha = true;
+					Pending.DepthReadback.bDepthOnly = true;
 
 					// Depth keeps its own dimensions all the way through. With
 					// separate depth intrinsics these differ from the colour ones,
@@ -844,9 +845,11 @@ void UCameraCaptureSubsystem::KickAllCaptures()
 			}
 		}
 
-		// If neither RGB nor DMV was kicked, skip enqueueing this capture
-		// (should be rare since RGB is usually enabled, but just in case)
-		if (!Pending.bHasRgb && !Pending.bHasDmv)
+		// If nothing at all was kicked, skip enqueueing this capture. Depth counts:
+		// a two-render camera capturing depth and no colour has only bHasDepth
+		// set, and leaving it out here discarded the readback and published no
+		// frame.
+		if (!Pending.bHasRgb && !Pending.bHasDmv && !Pending.bHasDepth)
 		{
 			continue;
 		}

@@ -299,8 +299,15 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Camera Capture")
 	UTextureRenderTarget2D* GetDepthRenderTarget(UIntrinsicSceneCaptureComponent2D* Camera) const;
 
-	/** The motion/ID pass's target for a camera, or null when that pass is not
-	 *  running. Velocity in R,G; semantic class from the custom stencil in B. */
+	/**
+	 * The motion pass's target for a camera, or null when that pass is not
+	 * running.
+	 *
+	 * Velocity is in G and B. R carries the material's legacy depth output and
+	 * is not read -- see the capture material path in Initialize for why it has
+	 * not been moved down. No semantic class is published; that plane is planned,
+	 * not built.
+	 */
 	UFUNCTION(BlueprintPure, Category = "Camera Capture")
 	UTextureRenderTarget2D* GetMotionRenderTarget(UIntrinsicSceneCaptureComponent2D* Camera) const;
 
@@ -677,9 +684,9 @@ private:
 	/** Colour output format; see ERammsCaptureColorFormat. */
 	ERammsCaptureColorFormat ColorFormat = ERammsCaptureColorFormat::CombinedEXR;
 
-	/** Renders per camera; see ERammsCaptureMode. Defaults to the two-render
-	 *  mode, which is the existing behaviour and the only one that can produce
-	 *  motion vectors. */
+	/** How colour and depth are captured; see ERammsCaptureMode. Defaults to the
+	 *  one-render mode, whose depth is the same engine path either way. Motion is
+	 *  a separate pass and is available in both. */
 	ERammsCaptureMode CaptureMode = ERammsCaptureMode::SingleCaptureColorDepth;
 
 	/**
