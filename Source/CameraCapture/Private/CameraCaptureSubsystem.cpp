@@ -1244,19 +1244,21 @@ void UCameraCaptureSubsystem::HarvestRgbReadback(FPendingReadback& Readback, FCa
 	}
 
 	const int32 NumPixels = Width * Height;
-	// A depth-only capture still walks the buffer, but into a scratch row rather
-	// than over the colour plane another capture already filled.
-	static thread_local TArray<FColor> DiscardRow;
-	if (Readback.bDepthOnly)
-	{
-		DiscardRow.SetNumUninitialized(Width);
-	}
-	else
+
+	// A depth-only capture does not write colour at all. This used to convert it
+	// into a function-local `static thread_local` scratch row, which is a
+	// shutdown hazard rather than a correctness one: a non-trivial destructor on
+	// a thread_local belonging to the RENDER thread frees through the engine
+	// allocator when that thread exits, which is late enough in teardown to be a
+	// bad place to be allocating or freeing anything. Skipping the write is
+	// simpler and cheaper besides.
+	const bool		 bWantColour = !Readback.bDepthOnly;
+	FColor* RESTRICT Dst = nullptr;
+	if (bWantColour)
 	{
 		OutData.ImageData.SetNumUninitialized(NumPixels);
+		Dst = OutData.ImageData.GetData();
 	}
-	FColor* RESTRICT Dst = Readback.bDepthOnly ? DiscardRow.GetData() : OutData.ImageData.GetData();
-	const int32		 DstStride = Readback.bDepthOnly ? 0 : Width;
 
 	// Single-capture mode: alpha is scene depth in centimetres, straight from
 	// the engine's SCS_SceneColorSceneDepth pass, so this one readback fills
@@ -1278,9 +1280,13 @@ void UCameraCaptureSubsystem::HarvestRgbReadback(FPendingReadback& Readback, FCa
 			const FLinearColor* SrcRow = static_cast<const FLinearColor*>(SrcData);
 			for (int32 y = 0; y < Height; y++)
 			{
-				for (int32 x = 0; x < Width; x++)
+				if (Dst)
 				{
-					Dst[x] = SrcRow[x].ToFColor(true);
+					for (int32 x = 0; x < Width; x++)
+					{
+						Dst[x] = SrcRow[x].ToFColor(true);
+					}
+					Dst += Width;
 				}
 				if (DepthDst)
 				{
@@ -1290,7 +1296,6 @@ void UCameraCaptureSubsystem::HarvestRgbReadback(FPendingReadback& Readback, FCa
 					}
 					DepthDst += Width;
 				}
-				Dst += DstStride;
 				SrcRow += RowPitchInPixels;
 			}
 			break;
@@ -1303,9 +1308,13 @@ void UCameraCaptureSubsystem::HarvestRgbReadback(FPendingReadback& Readback, FCa
 			const FFloat16Color* SrcRow = static_cast<const FFloat16Color*>(SrcData);
 			for (int32 y = 0; y < Height; y++)
 			{
-				for (int32 x = 0; x < Width; x++)
+				if (Dst)
 				{
-					Dst[x] = FLinearColor(SrcRow[x]).ToFColor(true);
+					for (int32 x = 0; x < Width; x++)
+					{
+						Dst[x] = FLinearColor(SrcRow[x]).ToFColor(true);
+					}
+					Dst += Width;
 				}
 				if (DepthDst)
 				{
@@ -1315,7 +1324,6 @@ void UCameraCaptureSubsystem::HarvestRgbReadback(FPendingReadback& Readback, FCa
 					}
 					DepthDst += Width;
 				}
-				Dst += DstStride;
 				SrcRow += RowPitchInPixels;
 			}
 			break;
@@ -1335,6 +1343,13 @@ void UCameraCaptureSubsystem::HarvestRgbReadback(FPendingReadback& Readback, FCa
 				OutData.DepthWidth = 0;
 				OutData.DepthHeight = 0;
 				DepthDst = nullptr;
+			}
+			// Dst is null for a depth-only readback, which cannot reach this
+			// branch today -- the depth capture's target is always float -- but a
+			// memcpy to null is not the way to find out if that ever changes.
+			if (!Dst)
+			{
+				break;
 			}
 			const FColor* SrcRow = static_cast<const FColor*>(SrcData);
 			if (Width == RowPitchInPixels)
