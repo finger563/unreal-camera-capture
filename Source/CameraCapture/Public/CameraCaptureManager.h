@@ -69,12 +69,18 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (DisplayName = "Capture Depth"))
 	bool bCaptureDepth = true;
 
-	/** Capture motion vector data (screen-space velocity) */
-	/** How many scene renders each camera costs. The single-capture mode roughly
-	 *  halves it, at the price of motion vectors and of depth sharing the colour
-	 *  resolution; see ERammsCaptureMode. */
+	/**
+	 * How colour and depth are captured, and so how many renders that costs: one
+	 * for the single-capture mode, two when colour needs tone mapping. Depth is
+	 * the same engine path either way, so the two never disagree about distance.
+	 *
+	 * Motion vectors are NOT part of this choice. They are their own pass, turned
+	 * on with Capture Motion Vectors, and cost one further render in either mode.
+	 * The single-capture mode's remaining trade is that depth shares the colour
+	 * resolution, since both planes come from one target.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (DisplayName = "Capture Mode"))
-	ERammsCaptureMode CaptureMode = ERammsCaptureMode::ColorPlusDepthMotion;
+	ERammsCaptureMode CaptureMode = ERammsCaptureMode::SingleCaptureColorDepth;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (DisplayName = "Capture Motion Vectors"))
 	bool bCaptureMotionVectors = true;
