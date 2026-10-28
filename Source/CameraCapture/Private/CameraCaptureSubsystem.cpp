@@ -1,5 +1,8 @@
 #include "CameraCaptureSubsystem.h"
+#include "CameraCaptureSegmentation.h"
 #include "IntrinsicSceneCaptureComponent2D.h"
+#include "IImageWrapperModule.h"
+#include "Modules/ModuleManager.h"
 #include "Utilities.h"
 #include "RHIGPUReadback.h"
 #include "RenderingThread.h"
@@ -95,6 +98,17 @@ void UCameraCaptureSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 		UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Loaded M_DmvCapture material successfully from plugin"));
 	}
 
+	// The class-mask material: R = custom-depth stencil, G = 1 so a harvest can tell the pass ran.
+	SegMaterialBase = Cast<UMaterial>(StaticLoadObject(UMaterial::StaticClass(), nullptr,
+		TEXT("/Script/Engine.Material'/CameraCapture/Materials/M_SegStencil.M_SegStencil'")));
+	if (!SegMaterialBase)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[CameraCaptureSubsystem] Failed to load M_SegStencil; segmentation capture is unavailable"));
+	}
+
+	// Class masks are encoded off the game thread, where a module cannot be loaded; load it here.
+	FModuleManager::LoadModuleChecked<IImageWrapperModule>(FName(TEXT("ImageWrapper")));
+
 	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Initialized"));
 }
 
@@ -127,6 +141,9 @@ void UCameraCaptureSubsystem::Deinitialize()
 	DmvCameras.Empty();
 	DepthCameras.Empty();
 	DepthRenderTargets.Empty();
+	SegCameras.Empty();
+	SegRenderTargets.Empty();
+	LastWrittenSegTable.Reset();
 
 	Super::Deinitialize();
 
@@ -216,8 +233,50 @@ void UCameraCaptureSubsystem::RegisterCamera(UIntrinsicSceneCaptureComponent2D* 
 	{
 		SetupDmvCamera(Camera);
 	}
+	if (bCaptureSegmentation)
+	{
+		SetupSegCamera(Camera);
+	}
 
 	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Registered camera: %s"), *CameraID.ToString());
+}
+
+UIntrinsicSceneCaptureComponent2D* UCameraCaptureSubsystem::SpawnCamera(FName Name, const FTransform& WorldTransform,
+	const FCameraIntrinsics& Intrinsics, bool bRegister)
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return nullptr;
+	}
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	Params.ObjectFlags |= RF_Transient;
+	AActor* Actor = World->SpawnActor<AActor>(AActor::StaticClass(), WorldTransform, Params);
+	if (!Actor)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] SpawnCamera could not spawn an actor"));
+		return nullptr;
+	}
+	const FName CameraName = Name.IsNone() ? FName(TEXT("Camera")) : Name;
+	UIntrinsicSceneCaptureComponent2D* Camera = NewObject<UIntrinsicSceneCaptureComponent2D>(Actor, CameraName, RF_Transient);
+	Camera->bUseCustomIntrinsics = true;
+	Camera->bUseIntrinsicsAsset = false;
+	Camera->InlineIntrinsics = Intrinsics;
+	Camera->bDrawFrustumInGame = false;
+	Actor->SetRootComponent(Camera);
+	Actor->AddInstanceComponent(Camera);
+	// Registering on an actor that has begun play runs the component's BeginPlay, which applies the intrinsics.
+	Camera->RegisterComponent();
+	Actor->SetActorTransform(WorldTransform);
+#if WITH_EDITOR
+	Actor->SetActorLabel(CameraName.ToString());
+#endif
+	if (bRegister)
+	{
+		RegisterCamera(Camera);
+	}
+	return Camera;
 }
 
 void UCameraCaptureSubsystem::SetupDepthCamera(UIntrinsicSceneCaptureComponent2D* RgbCamera)
@@ -434,6 +493,183 @@ void UCameraCaptureSubsystem::SetupDmvCamera(UIntrinsicSceneCaptureComponent2D* 
 		*DmvName, Width, Height, DmvCamera->bUseCustomIntrinsics ? TEXT("custom") : TEXT("default"));
 }
 
+void UCameraCaptureSubsystem::SetupSegCamera(UIntrinsicSceneCaptureComponent2D* RgbCamera)
+{
+	if (!bCaptureSegmentation || !RgbCamera || !SegMaterialBase || SegCameras.Contains(RgbCamera))
+	{
+		return;
+	}
+
+	// The COLOUR grid and pose: a class mask is read against the colour image, so it has the colour
+	// camera's intrinsics and no depth-sensor offset.
+	const FCameraIntrinsics Intrinsics = RgbCamera->GetActiveIntrinsics();
+	const int32				Width = Intrinsics.ImageWidth;
+	const int32				Height = Intrinsics.ImageHeight;
+	if (Width < 1 || Height < 1)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] %s has invalid intrinsics %dx%d; no segmentation camera made"),
+			*RgbCamera->GetName(), Width, Height);
+		return;
+	}
+
+	const FString SegName = RgbCamera->GetName() + TEXT("_seg");
+	// The colour camera as template, like the motion pass: its projection, FOV and intrinsics come along,
+	// and BeginPlay (from RegisterComponent) applies them exactly as it did for the colour camera.
+	UIntrinsicSceneCaptureComponent2D* SegCamera = NewObject<UIntrinsicSceneCaptureComponent2D>(
+		RgbCamera->GetOwner(), RgbCamera->GetClass(), FName(*SegName), RF_Transient, RgbCamera);
+	if (!SegCamera)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Failed to create segmentation camera for %s"), *RgbCamera->GetName());
+		return;
+	}
+
+	SegCamera->bUseDepthIntrinsics = false;
+	SegCamera->bUseDepthSensorOffset = false;
+	SegCamera->SetupAttachment(RgbCamera);
+	SegCamera->SetRelativeLocation(FVector::ZeroVector);
+	SegCamera->SetRelativeRotation(FRotator::ZeroRotator);
+	SegCamera->bCaptureEveryFrame = false;
+	SegCamera->bCaptureOnMovement = false;
+	SegCamera->bAlwaysPersistRenderingState = true;
+	SegCamera->bDrawFrustumInGame = false;
+	SegCamera->bDrawFrustumInEditor = false;
+	// The material runs after tone mapping, like the motion pass's, and writes the stencil as a float.
+	SegCamera->CaptureSource = SCS_FinalColorLDR;
+
+	// The mask needs the stencil and nothing else, so everything that only shades is switched off -- most of
+	// a frame's cost. Post-processing stays on: the material IS a post-process. Looked up by name so a flag
+	// an engine version lacks is skipped rather than failing the build.
+	static const TCHAR* const OffFlags[] = {
+		TEXT("Lighting"), TEXT("DynamicShadows"), TEXT("GlobalIllumination"), TEXT("LumenGlobalIllumination"),
+		TEXT("LumenReflections"), TEXT("AmbientOcclusion"), TEXT("ScreenSpaceReflections"), TEXT("ReflectionEnvironment"),
+		TEXT("Fog"), TEXT("VolumetricFog"), TEXT("Atmosphere"), TEXT("Cloud"), TEXT("Bloom"), TEXT("MotionBlur"),
+		TEXT("EyeAdaptation"), TEXT("LensFlares"), TEXT("AntiAliasing"), TEXT("TemporalAA"), TEXT("DepthOfField"),
+	};
+	for (const TCHAR* Flag : OffFlags)
+	{
+		const int32 Index = FEngineShowFlags::FindIndexByName(Flag);
+		if (Index != INDEX_NONE)
+		{
+			SegCamera->ShowFlags.SetSingleFlag(static_cast<uint32>(Index), false);
+		}
+	}
+
+	UMaterialInstanceDynamic* SegMaterial = UMaterialInstanceDynamic::Create(SegMaterialBase, this);
+	if (!SegMaterial)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Failed to create segmentation material for %s"), *RgbCamera->GetName());
+		return;
+	}
+	// Only this blendable: the colour camera's own (a lens-distortion material, say) would run first and
+	// leave the stencil read misaligned or overwritten.
+	SegCamera->PostProcessSettings.WeightedBlendables.Array.Empty();
+	SegCamera->PostProcessSettings.WeightedBlendables.Array.Add(FWeightedBlendable(1.0f, SegMaterial));
+
+	// Half floats hold every integer 0-255 exactly, at half the bytes of RGBA32f.
+	UTextureRenderTarget2D* SegRT = NewObject<UTextureRenderTarget2D>(this);
+	SegRT->RenderTargetFormat = RTF_RGBA16f;
+	// Labels, not intensities: a viewer sampling this must never blend two class values into a third.
+	SegRT->Filter = TF_Nearest;
+	SegRT->InitAutoFormat(Width, Height);
+	SegRT->UpdateResourceImmediate(true);
+	SegCamera->TextureTarget = SegRT;
+
+	SegCamera->RegisterComponent();
+	SegCameras.Add(RgbCamera, SegCamera);
+	SegRenderTargets.Add(RgbCamera, SegRT);
+
+	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Created segmentation camera '%s' (%dx%d)"), *SegName, Width, Height);
+}
+
+void UCameraCaptureSubsystem::DestroySegCamera(UIntrinsicSceneCaptureComponent2D* RgbCamera)
+{
+	if (TWeakObjectPtr<USceneCaptureComponent2D>* Found = SegCameras.Find(RgbCamera))
+	{
+		if (USceneCaptureComponent2D* SegCamera = Found->Get())
+		{
+			SegCamera->DestroyComponent();
+		}
+	}
+	SegCameras.Remove(RgbCamera);
+	SegRenderTargets.Remove(RgbCamera);
+}
+
+void UCameraCaptureSubsystem::SetCaptureSegmentation(bool bEnable)
+{
+	if (bEnable && !SegMaterialBase)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Segmentation needs M_SegStencil, which did not load"));
+		bEnable = false;
+	}
+	if (bEnable == bCaptureSegmentation)
+	{
+		return;
+	}
+	bCaptureSegmentation = bEnable;
+
+	for (const TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D>& Weak : RegisteredCameras)
+	{
+		if (UIntrinsicSceneCaptureComponent2D* Camera = Weak.Get())
+		{
+			if (bCaptureSegmentation)
+			{
+				SetupSegCamera(Camera);
+			}
+			else
+			{
+				DestroySegCamera(Camera);
+			}
+		}
+	}
+	UpdateSegmentationLabeling();
+	if (bCaptureSegmentation && bIsCapturing)
+	{
+		LastWrittenSegTable.Reset();
+		WriteClassTableIfChanged();
+	}
+	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Segmentation %s"), bCaptureSegmentation ? TEXT("on") : TEXT("off"));
+}
+
+void UCameraCaptureSubsystem::UpdateSegmentationLabeling()
+{
+	if (UWorld* World = GetWorld())
+	{
+		if (UCameraCaptureSegmentationSubsystem* Labels = World->GetSubsystem<UCameraCaptureSegmentationSubsystem>())
+		{
+			Labels->SetLabelingEnabled(bCaptureSegmentation);
+		}
+	}
+}
+
+void UCameraCaptureSubsystem::WriteClassTableIfChanged()
+{
+	UWorld*								World = GetWorld();
+	UCameraCaptureSegmentationSubsystem* Labels = World ? World->GetSubsystem<UCameraCaptureSegmentationSubsystem>() : nullptr;
+	if (!Labels)
+	{
+		return;
+	}
+	TSharedRef<const FCameraCaptureSegTable> Current = Labels->GetTable();
+	if (LastWrittenSegTable.Get() == &Current.Get() && LastWrittenSegTableDir == OutputDirectory)
+	{
+		return;
+	}
+	if (Labels->WriteClassTable(OutputDirectory))
+	{
+		LastWrittenSegTable = Current;
+		LastWrittenSegTableDir = OutputDirectory;
+	}
+}
+
+UTextureRenderTarget2D* UCameraCaptureSubsystem::GetSegmentationRenderTarget(UIntrinsicSceneCaptureComponent2D* Camera) const
+{
+	if (const TWeakObjectPtr<UTextureRenderTarget2D>* Found = Camera ? SegRenderTargets.Find(Camera) : nullptr)
+	{
+		return Found->Get();
+	}
+	return nullptr;
+}
+
 void UCameraCaptureSubsystem::UnregisterCamera(UIntrinsicSceneCaptureComponent2D* Camera)
 {
 	if (!Camera)
@@ -491,6 +727,8 @@ void UCameraCaptureSubsystem::UnregisterCamera(UIntrinsicSceneCaptureComponent2D
 		DepthCameras.Remove(Camera);
 		DepthRenderTargets.Remove(Camera);
 
+		DestroySegCamera(Camera);
+
 		CameraIDMap.Remove(Camera);
 	}
 }
@@ -533,6 +771,28 @@ void UCameraCaptureSubsystem::StartCapture()
 	TotalFramesCaptured = 0;
 	FrameIdCounter = 0;
 	CaptureStartTime = FPlatformTime::Seconds();
+
+	if (bCaptureSegmentation)
+	{
+		// Labels go on with the channel, but tags can arrive after that (a generator labels its output in its
+		// own BeginPlay, or after regenerating), so read them again at every start.
+		if (UWorld* World = GetWorld())
+		{
+			if (UCameraCaptureSegmentationSubsystem* Labels = World->GetSubsystem<UCameraCaptureSegmentationSubsystem>())
+			{
+				if (Labels->IsLabelingEnabled())
+				{
+					Labels->RelabelWorld();
+				}
+				else
+				{
+					Labels->SetLabelingEnabled(true);
+				}
+			}
+		}
+		LastWrittenSegTable.Reset();
+		WriteClassTableIfChanged();
+	}
 
 	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Started capture with %d cameras"), RegisteredCameras.Num());
 	UE_LOG(LogTemp, Log, TEXT("[CameraCaptureSubsystem] Output directory: %s"), *OutputDirectory);
@@ -845,11 +1105,29 @@ void UCameraCaptureSubsystem::KickAllCaptures()
 			}
 		}
 
+		// --- Kick the segmentation pass: the class mask, on the colour grid ---
+		if (bCaptureSegmentation)
+		{
+			if (TWeakObjectPtr<USceneCaptureComponent2D>* SegCameraPtr = SegCameras.Find(Camera); SegCameraPtr && SegCameraPtr->IsValid())
+			{
+				USceneCaptureComponent2D* SegCamera = SegCameraPtr->Get();
+				SegCamera->CaptureScene();
+				if (UTextureRenderTarget2D* SegRT = SegCamera->TextureTarget)
+				{
+					Pending.SegReadback.Width = SegRT->SizeX;
+					Pending.SegReadback.Height = SegRT->SizeY;
+					Pending.SegReadback.PixelFormat = GetPixelFormatFromRenderTargetFormat(SegRT->RenderTargetFormat);
+					EnqueueAsyncReadback(SegRT, Pending.SegReadback.Readback, Pending.SegReadback.CopyIssued);
+					Pending.bHasSeg = true;
+				}
+			}
+		}
+
 		// If nothing at all was kicked, skip enqueueing this capture. Depth counts:
 		// a two-render camera capturing depth and no colour has only bHasDepth
 		// set, and leaving it out here discarded the readback and published no
 		// frame.
-		if (!Pending.bHasRgb && !Pending.bHasDmv && !Pending.bHasDepth)
+		if (!Pending.bHasRgb && !Pending.bHasDmv && !Pending.bHasDepth && !Pending.bHasSeg)
 		{
 			continue;
 		}
@@ -1041,8 +1319,9 @@ void UCameraCaptureSubsystem::HarvestReadyReadbacks()
 		const bool bRgbReady = !Pending.bHasRgb || !Pending.RgbReadback.Readback || Pending.RgbReadback.IsReadyForHarvest();
 		const bool bDmvReady = !Pending.bHasDmv || !Pending.DmvReadback.Readback || Pending.DmvReadback.IsReadyForHarvest();
 		const bool bDepthReady = !Pending.bHasDepth || !Pending.DepthReadback.Readback || Pending.DepthReadback.IsReadyForHarvest();
+		const bool bSegReady = !Pending.bHasSeg || !Pending.SegReadback.Readback || Pending.SegReadback.IsReadyForHarvest();
 
-		if (bRgbReady && bDmvReady && bDepthReady)
+		if (bRgbReady && bDmvReady && bDepthReady && bSegReady)
 		{
 			// The copy out of the staging buffer has to happen on the RENDER
 			// thread: FRHIGPUTextureReadback::Lock goes through
@@ -1069,6 +1348,11 @@ void UCameraCaptureSubsystem::HarvestReadyReadbacks()
 			{
 				DepthRb = MakeShared<FPendingReadback>(MoveTemp(Pending.DepthReadback));
 			}
+			TSharedPtr<FPendingReadback> SegRb;
+			if (Pending.bHasSeg && Pending.SegReadback.Readback)
+			{
+				SegRb = MakeShared<FPendingReadback>(MoveTemp(Pending.SegReadback));
+			}
 			PendingCaptures.RemoveAt(i);
 
 			// Weak: the harvest outlives this tick, and the world (with this
@@ -1077,7 +1361,7 @@ void UCameraCaptureSubsystem::HarvestReadyReadbacks()
 
 			ENQUEUE_RENDER_COMMAND(CameraCaptureHarvestReadbacks)
 			(
-				[WeakThis, DataRef, RgbRb, DmvRb, DepthRb](FRHICommandListImmediate& RHICmdList) {
+				[WeakThis, DataRef, RgbRb, DmvRb, DepthRb, SegRb](FRHICommandListImmediate& RHICmdList) {
 					if (RgbRb.IsValid())
 					{
 						HarvestRgbReadback(*RgbRb, *DataRef);
@@ -1092,10 +1376,14 @@ void UCameraCaptureSubsystem::HarvestReadyReadbacks()
 					{
 						HarvestRgbReadback(*DepthRb, *DataRef);
 					}
+					if (SegRb.IsValid())
+					{
+						HarvestSegReadback(*SegRb, *DataRef);
+					}
 
 					// Back to the game thread to publish: listeners expect it,
 					// and the readback pool is not synchronised.
-					AsyncTask(ENamedThreads::GameThread, [WeakThis, DataRef, RgbRb, DmvRb, DepthRb]() {
+					AsyncTask(ENamedThreads::GameThread, [WeakThis, DataRef, RgbRb, DmvRb, DepthRb, SegRb]() {
 						UCameraCaptureSubsystem* Self = WeakThis.Get();
 						if (!Self)
 						{
@@ -1130,6 +1418,10 @@ void UCameraCaptureSubsystem::HarvestReadyReadbacks()
 						if (DepthRb.IsValid())
 						{
 							Self->ReleaseReadback(MoveTemp(DepthRb->Readback), DepthRb->GetShape());
+						}
+						if (SegRb.IsValid())
+						{
+							Self->ReleaseReadback(MoveTemp(SegRb->Readback), SegRb->GetShape());
 						}
 					});
 				});
@@ -1467,6 +1759,98 @@ void UCameraCaptureSubsystem::HarvestDmvReadback(FPendingReadback& Readback, FCa
 	Readback.Readback->Unlock();
 }
 
+void UCameraCaptureSubsystem::HarvestSegReadback(FPendingReadback& Readback, FCaptureData& OutData)
+{
+	check(IsInRenderingThread());
+	const EPixelFormat Format = Readback.PixelFormat;
+	if (Format != PF_FloatRGBA && Format != PF_A32B32G32R32F)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Segmentation readback has pixel format %d; it needs a float target. Skipping."),
+			static_cast<int32>(Format));
+		return;
+	}
+	if (!ReadbackMatchesItsStagingTexture(Readback, TEXT("Segmentation")))
+	{
+		return;
+	}
+
+	int32 RowPitchInPixels = 0;
+	int32 BufferHeight = 0;
+	void* SrcData = Readback.Readback->Lock(RowPitchInPixels, &BufferHeight);
+	if (!SrcData)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[CameraCaptureSubsystem] Failed to lock segmentation readback"));
+		Readback.Readback->Unlock();
+		return;
+	}
+
+	const int32 Width = Readback.Width;
+	const int32 Height = Readback.Height;
+	if (Width <= 0 || Height <= 0 || RowPitchInPixels < Width || (BufferHeight > 0 && BufferHeight < Height))
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("[CameraCaptureSubsystem] Segmentation readback geometry does not hold the expected image: %dx%d requested, pitch %d, buffer height %d"),
+			Width, Height, RowPitchInPixels, BufferHeight);
+		Readback.Readback->Unlock();
+		return;
+	}
+
+	OutData.ClassData.SetNumUninitialized(Width * Height);
+	uint8* RESTRICT Dst = OutData.ClassData.GetData();
+	// G is 1 wherever M_SegStencil ran. A post-process material that did not run (not compiled yet, or
+	// disabled) leaves scene colour behind, which would otherwise read as plausible small class values.
+	int64 NotRun = 0;
+	auto Put = [&NotRun](float R, float G) -> uint8 {
+		NotRun += G < 0.5f ? 1 : 0;
+		return static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(R), 0, 255));
+	};
+	if (Format == PF_FloatRGBA)
+	{
+		const FFloat16Color* SrcRow = static_cast<const FFloat16Color*>(SrcData);
+		for (int32 y = 0; y < Height; y++)
+		{
+			for (int32 x = 0; x < Width; x++)
+			{
+				Dst[x] = Put(SrcRow[x].R.GetFloat(), SrcRow[x].G.GetFloat());
+			}
+			Dst += Width;
+			SrcRow += RowPitchInPixels;
+		}
+	}
+	else
+	{
+		const FLinearColor* SrcRow = static_cast<const FLinearColor*>(SrcData);
+		for (int32 y = 0; y < Height; y++)
+		{
+			for (int32 x = 0; x < Width; x++)
+			{
+				Dst[x] = Put(SrcRow[x].R, SrcRow[x].G);
+			}
+			Dst += Width;
+			SrcRow += RowPitchInPixels;
+		}
+	}
+	Readback.Readback->Unlock();
+
+	if (NotRun > static_cast<int64>(Width) * Height / 200)
+	{
+		static double LastWarn = 0.0;
+		const double Now = FPlatformTime::Seconds();
+		if (Now - LastWarn > 5.0)
+		{
+			LastWarn = Now;
+			UE_LOG(LogTemp, Warning,
+				TEXT("[CameraCaptureSubsystem] Segmentation pass did not run on %lld of %d pixels (M_SegStencil still compiling?); ")
+					TEXT("dropping this frame's class mask"),
+				NotRun, Width * Height);
+		}
+		OutData.ClassData.Reset();
+		return;
+	}
+	OutData.ClassWidth = Width;
+	OutData.ClassHeight = Height;
+}
+
 // ============================================================================
 // Metadata + Render Target Helpers
 // ============================================================================
@@ -1624,9 +2008,23 @@ void UCameraCaptureSubsystem::SerializeCaptureData(TSharedRef<const FCaptureData
 	bool						   bMotion = bCaptureMotionVectors;
 	const ERammsCaptureColorFormat Format = ColorFormat;
 
+	// The class table travels with the frame, as the immutable snapshot it was when the frame was written.
+	TSharedPtr<const FCameraCaptureSegTable> SegTable;
+	if (bCaptureSegmentation && Data->ClassData.Num() > 0)
+	{
+		WriteClassTableIfChanged();
+		if (UWorld* World = GetWorld())
+		{
+			if (UCameraCaptureSegmentationSubsystem* Labels = World->GetSubsystem<UCameraCaptureSegmentationSubsystem>())
+			{
+				SegTable = Labels->GetTable();
+			}
+		}
+	}
+
 	// Lambda captures the shared ref — keeps data alive until async write completes
 	AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
-		[Data, OutputDir, bRGB, bDepth, bMotion, Format]() {
+		[Data, OutputDir, bRGB, bDepth, bMotion, Format, SegTable]() {
 			FString AbsoluteOutputDir = OutputDir;
 			if (FPaths::IsRelative(AbsoluteOutputDir))
 			{
@@ -1643,9 +2041,14 @@ void UCameraCaptureSubsystem::SerializeCaptureData(TSharedRef<const FCaptureData
 			FString ExrPath = FPaths::Combine(CameraPath, FString::Printf(TEXT("frame_%s.exr"), *FrameNumberStr));
 			WriteEXRFile_Static(ExrPath, *Data, bRGB, bDepth, bMotion, Format);
 
+			if (SegTable.IsValid())
+			{
+				WriteClassMasks_Static(FPaths::Combine(CameraPath, FString::Printf(TEXT("frame_%s_class.png"), *FrameNumberStr)), *Data, *SegTable);
+			}
+
 			// Write metadata JSON
 			FString MetadataPath = FPaths::Combine(CameraPath, FString::Printf(TEXT("frame_%s.json"), *FrameNumberStr));
-			WriteMetadataFile_Static(MetadataPath, *Data, Format, bDepth);
+			WriteMetadataFile_Static(MetadataPath, *Data, Format, bDepth, SegTable.Get());
 		});
 }
 
@@ -1854,8 +2257,31 @@ bool UCameraCaptureSubsystem::WriteEXRFile_Static(const FString& FilePath, const
 	return true;
 }
 
+bool UCameraCaptureSubsystem::WriteClassMasks_Static(const FString& FineClassPath, const FCaptureData& Data, const FCameraCaptureSegTable& SegTable)
+{
+	const int32 N = Data.ClassWidth * Data.ClassHeight;
+	if (N <= 0 || Data.ClassData.Num() != N)
+	{
+		return false;
+	}
+	bool bOk = CameraCaptureUtils::WriteGrayPNG(FineClassPath, Data.ClassData.GetData(), N, Data.ClassWidth, Data.ClassHeight, 8);
+
+	TArray<uint8> Coarse;
+	Coarse.SetNumUninitialized(N);
+	const uint8* RESTRICT Lut = SegTable.FineToCoarse.GetData();
+	const uint8* RESTRICT Src = Data.ClassData.GetData();
+	uint8* RESTRICT		  Dst = Coarse.GetData();
+	for (int32 i = 0; i < N; i++)
+	{
+		Dst[i] = Lut[Src[i]];
+	}
+	bOk &= CameraCaptureUtils::WriteGrayPNG(FineClassPath.Replace(TEXT("_class.png"), TEXT("_class_coarse.png")), Coarse.GetData(), N,
+		Data.ClassWidth, Data.ClassHeight, 8);
+	return bOk;
+}
+
 bool UCameraCaptureSubsystem::WriteMetadataFile_Static(const FString& FilePath, const FCaptureData& Data,
-	ERammsCaptureColorFormat Format, bool bCaptureDepth)
+	ERammsCaptureColorFormat Format, bool bCaptureDepth, const FCameraCaptureSegTable* SegTable)
 {
 	// Create JSON object
 	TSharedPtr<FJsonObject> JsonObject = MakeShared<FJsonObject>();
@@ -1919,6 +2345,38 @@ bool UCameraCaptureSubsystem::WriteMetadataFile_Static(const FString& FilePath, 
 	}
 	JsonObject->SetStringField(TEXT("color_format"), bSeparate ? TEXT("png") : TEXT("exr"));
 	JsonObject->SetStringField(TEXT("layout"), bSeparate ? TEXT("separate") : TEXT("combined"));
+
+	// The classes this frame shows, with their pixel counts, so a dataset can be filtered without opening
+	// the masks.
+	if (SegTable && Data.ClassWidth > 0 && Data.ClassData.Num() == Data.ClassWidth * Data.ClassHeight)
+	{
+		int64 Counts[256] = {};
+		for (const uint8 V : Data.ClassData)
+		{
+			Counts[V]++;
+		}
+		TSharedPtr<FJsonObject> Seg = MakeShared<FJsonObject>();
+		Seg->SetNumberField(TEXT("width"), Data.ClassWidth);
+		Seg->SetNumberField(TEXT("height"), Data.ClassHeight);
+		TArray<TSharedPtr<FJsonValue>> Classes;
+		for (int32 V = 0; V < 256; ++V)
+		{
+			if (Counts[V] == 0)
+			{
+				continue;
+			}
+			TSharedPtr<FJsonObject> C = MakeShared<FJsonObject>();
+			C->SetNumberField(TEXT("value"), V);
+			const bool bReserved = SegTable->Reserved.Contains(V);
+			C->SetStringField(TEXT("name"), bReserved ? TEXT("reserved") : SegTable->FineNames[V].ToString());
+			C->SetNumberField(TEXT("coarse_id"), SegTable->FineToCoarse[V]);
+			C->SetStringField(TEXT("coarse_name"), SegTable->CoarseNames[SegTable->FineToCoarse[V]].ToString());
+			C->SetNumberField(TEXT("pixels"), static_cast<double>(Counts[V]));
+			Classes.Add(MakeShared<FJsonValueObject>(C));
+		}
+		Seg->SetArrayField(TEXT("classes"), Classes);
+		JsonObject->SetObjectField(TEXT("segmentation"), Seg);
+	}
 
 	JsonObject->SetStringField(TEXT("actor_path"), Data.ActorPath);
 	JsonObject->SetStringField(TEXT("level_name"), Data.LevelName);

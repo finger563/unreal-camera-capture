@@ -43,6 +43,7 @@ void ACameraCaptureManager::BeginPlay()
 	CachedSubsystem->SetOutputDirectory(OutputDirectory);
 	CachedSubsystem->SetCaptureRate(CaptureEveryNFrames);
 	CachedSubsystem->SetCaptureChannels(bCaptureRGB, bCaptureDepth, bCaptureMotionVectors);
+	CachedSubsystem->SetCaptureSegmentation(bCaptureSegmentation);
 
 	// Auto-configure cameras if enabled
 	if (bAutoConfigureCamerasOnBeginPlay)
@@ -117,6 +118,10 @@ void ACameraCaptureManager::PostEditChangeProperty(FPropertyChangedEvent& Proper
 		else if (PropertyName == GET_MEMBER_NAME_CHECKED(ACameraCaptureManager, bCaptureRGB) || PropertyName == GET_MEMBER_NAME_CHECKED(ACameraCaptureManager, bCaptureDepth) || PropertyName == GET_MEMBER_NAME_CHECKED(ACameraCaptureManager, bCaptureMotionVectors))
 		{
 			CachedSubsystem->SetCaptureChannels(bCaptureRGB, bCaptureDepth, bCaptureMotionVectors);
+		}
+		else if (PropertyName == GET_MEMBER_NAME_CHECKED(ACameraCaptureManager, bCaptureSegmentation))
+		{
+			CachedSubsystem->SetCaptureSegmentation(bCaptureSegmentation);
 		}
 		else if (PropertyName == GET_MEMBER_NAME_CHECKED(ACameraCaptureManager, RegistrationMode) || PropertyName == GET_MEMBER_NAME_CHECKED(ACameraCaptureManager, CamerasToCapture))
 		{

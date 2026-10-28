@@ -35,6 +35,10 @@ Provides:
   multiple cameras (e.g., "RealSense D435" preset).
 - A `M_DmvCapture` material for saving depth + motion vectors to a single
   texture (used by both capture systems)
+- Semantic segmentation: a per-camera class mask from the custom-depth
+  stencil (`M_SegStencil`), with fine and coarse class tables, labelled by
+  `seg:<Class>` tags (`UCameraCaptureSegmentationSubsystem`). See
+  [Segmentation](#segmentation).
 
 <!-- markdown-toc start - Don't edit this section. Run M-x markdown-toc-refresh-toc -->
 **Table of Contents**
@@ -43,6 +47,7 @@ Provides:
   - [Usage](#usage)
   - [Camera Intrinsics](#camera-intrinsics)
   - [Data Collected](#data-collected)
+  - [Segmentation](#segmentation)
   - [Developing](#developing)
     - [Code style](#code-style)
   - [References](#references)
@@ -228,6 +233,98 @@ For backward compatibility, `CaptureComponent` also generates:
   - Columns: `i` (frame index), `time`, `tx`, `ty`, `tz`, `qw`, `qx`, `qy`, `qz` (world position in meters + quaternion)
 
 **Note**: The JSON metadata format is recommended for new projects as it includes more complete information.
+
+## Segmentation
+
+Turn on `bCaptureSegmentation` on the `CameraCaptureManager` (or call
+`UCameraCaptureSubsystem::SetCaptureSegmentation(true)`) and every camera
+also writes a class mask per frame:
+
+```
+SaveLocation/
+├── segmentation_classes.csv          # value,name,coarse_id,coarse_name,reserved
+├── segmentation_classes.json         # the same, plus the coarse list
+└── ActorName/CameraName/
+    ├── frame_0000000_class.png        # 8-bit, fine class value per pixel (0 = unlabelled)
+    ├── frame_0000000_class_coarse.png # 8-bit, coarse class id per pixel
+    └── frame_0000000.json             # + "segmentation": classes in view with pixel counts
+```
+
+<p align="center">
+  <img src="docs/images/segmentation_downtown.webp" width="100%" alt="A camera walking down a generated downtown sidewalk: colour, fine class mask and coarse class mask side by side">
+  <br><sub>Colour, fine classes and coarse classes from one camera walking a generated street
+  (<a href="https://github.com/rammp-org/ramms-sim">RAMMS</a> world generation; each class drawn in its
+  own colour).</sub>
+</p>
+
+<p align="center">
+  <img src="docs/images/segmentation_preview.jpg" width="80%" alt="One frame: colour, colour with the fine classes over it, the fine classes named, and the coarse classes named">
+</p>
+
+The masks are on the colour grid (the colour intrinsics and pose) and hold
+exact values: read them as single-channel 8-bit images, with no colour
+conversion. The class table is written beside the camera folders when capture
+starts and again whenever a class is added mid-run.
+
+**How it works.** While segmentation is on, every primitive renders into the
+custom-depth pass: labelled ones with their class value in the stencil,
+unlabelled ones with 0, so an unlabelled surface still hides a labelled one
+behind it. A second capture per camera, with lighting and the other shading
+features off, runs `M_SegStencil`, a post-process material that writes the
+stencil to R (and 1 to G, so a frame where the material did not run, while it
+is still compiling, say, is detected and dropped rather than written as
+plausible-looking values). It costs one more render per camera, but a cheap
+one. Custom depth needs `r.CustomDepth=3` (with stencil); the subsystem raises
+it if it is lower and logs that it did.
+
+The stencil pass respects masked materials, so foliage is cut out leaf by leaf,
+and it works for skeletal and instanced meshes alike.
+
+**Labels.** A primitive's class is the first of:
+
+1. a component tag `seg:<Class>` (`SetComponentClass`);
+2. an actor tag `seg:<Class>` (`SetActorClass`);
+3. the first `ActorClassRules` entry its actor is an instance of (pedestrians,
+   robots);
+4. `UntaggedClass`, if set.
+
+Otherwise it is unlabelled (0). Actors spawned while segmentation is on are
+labelled as they appear; call `RelabelWorld` after re-tagging in bulk.
+
+**Classes.** `[/Script/CameraCapture.CameraCaptureSegmentationSettings]` in
+the project's `DefaultGame.ini`:
+
+```ini
+[/Script/CameraCapture.CameraCaptureSegmentationSettings]
+TagPrefix=seg:
+DefaultCoarseClass=other
++ReservedStencilValues=200            ; used by something else: never handed out, never overwritten
++ActorClassRules=(ActorClass="/Script/MyGame.MyPedestrian",Class="Person")
++CoarseClasses=road                   ; coarse id 1, in order
++CoarseClasses=person
++CoarseClasses=other
++Classes=(Name="Road",Coarse="road",Value=1)
++Classes=(Name="Person",Coarse="person",Value=2)
+```
+
+Up to 255 fine classes. Give each a `Value` to keep masks comparable across
+runs. A tag naming a class not in the list still works: it gets the next free
+value and `DefaultCoarseClass` for that run, and a warning says so. A
+primitive that already renders custom depth with a reserved stencil value is
+left alone, and its pixels carry that value (marked `reserved` in the table).
+
+**Limits.**
+
+- Translucent surfaces (glass, water) do not render custom depth unless their
+  material allows custom-depth writes, so they take the class of what is
+  behind them.
+- One class per primitive: an instanced mesh component is one class for all of
+  its instances, and a mesh with several materials is one class.
+- Instances are not told apart. That is the next step: the class pass plus the
+  depth plane, matched against each instance's bounds.
+
+Scripted capture (dataset sweeps, tests) can put a camera anywhere with
+`UCameraCaptureSubsystem::SpawnCamera(Name, WorldTransform, Intrinsics)`.
 
 ## Reading EXR Files
 

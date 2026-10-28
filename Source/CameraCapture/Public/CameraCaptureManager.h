@@ -85,6 +85,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (DisplayName = "Capture Motion Vectors"))
 	bool bCaptureMotionVectors = true;
 
+	/** Capture a segmentation class mask per camera (custom-depth stencil, one extra unlit render per camera);
+	 *  see UCameraCaptureSegmentationSubsystem for how the world is labelled. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (DisplayName = "Capture Segmentation"))
+	bool bCaptureSegmentation = false;
+
 	// ============================================================================
 	// Camera Registration
 	// ============================================================================

@@ -130,6 +130,14 @@ namespace CameraCaptureUtils
 	bool WriteEXRPixels(const FString& FilePath, TArray64<FLinearColor> Pixels, int32 Width, int32 Height);
 
 	/**
+	 * Write a single-channel 8- or 16-bit PNG, synchronously (call it from a background task).
+	 *
+	 * For label masks: values are written exactly, with no colour transform, so a class or instance id reads
+	 * back as the number that went in. Data is Width*Height values of BitDepth bits, row-major.
+	 */
+	bool WriteGrayPNG(const FString& FilePath, const void* Data, int64 NumBytes, int32 Width, int32 Height, int32 BitDepth);
+
+	/**
 	 * Write image data to EXR file using ImageWriteQueue
 	 * @param FilePath - Output file path
 	 * @param RgbData - RGB image data
