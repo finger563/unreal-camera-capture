@@ -568,6 +568,8 @@ void UCameraCaptureSubsystem::SetupSegCamera(UIntrinsicSceneCaptureComponent2D* 
 	// Half floats hold every integer 0-255 exactly, at half the bytes of RGBA32f.
 	UTextureRenderTarget2D* SegRT = NewObject<UTextureRenderTarget2D>(this);
 	SegRT->RenderTargetFormat = RTF_RGBA16f;
+	// Labels, not intensities: a viewer sampling this must never blend two class values into a third.
+	SegRT->Filter = TF_Nearest;
 	SegRT->InitAutoFormat(Width, Height);
 	SegRT->UpdateResourceImmediate(true);
 	SegCamera->TextureTarget = SegRT;

@@ -250,6 +250,17 @@ SaveLocation/
     └── frame_0000000.json             # + "segmentation": classes in view with pixel counts
 ```
 
+<p align="center">
+  <img src="docs/images/segmentation_downtown.webp" width="100%" alt="A camera walking down a generated downtown sidewalk: colour, fine class mask and coarse class mask side by side">
+  <br><sub>Colour, fine classes and coarse classes from one camera walking a generated street
+  (<a href="https://github.com/rammp-org/ramms-sim">RAMMS</a> world generation; each class drawn in its
+  own colour).</sub>
+</p>
+
+<p align="center">
+  <img src="docs/images/segmentation_preview.jpg" width="80%" alt="One frame: colour, colour with the fine classes over it, the fine classes named, and the coarse classes named">
+</p>
+
 The masks are on the colour grid (the colour intrinsics and pose) and hold
 exact values: read them as single-channel 8-bit images, with no colour
 conversion. The class table is written beside the camera folders when capture

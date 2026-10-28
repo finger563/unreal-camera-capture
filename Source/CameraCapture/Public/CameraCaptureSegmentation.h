@@ -90,7 +90,8 @@ public:
 	/**
 	 * Stencil values something else already uses, never handed to a class. A primitive already rendering
 	 * custom depth with one of these is left alone (its pixels then read as that value, which the class
-	 * table reports as reserved). RAMMS's camera projector, for example, marks its target surfaces 200.
+	 * table reports as reserved): for a project where something else, a projector filtering its target
+	 * surfaces by stencil say, already uses the stencil.
 	 */
 	UPROPERTY(Config, EditAnywhere, Category = "Labels")
 	TArray<int32> ReservedStencilValues;
