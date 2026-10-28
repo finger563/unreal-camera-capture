@@ -11,6 +11,9 @@
 #include "Misc/FileHelper.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/World.h"
+#include "IImageWrapper.h"
+#include "IImageWrapperModule.h"
+#include "Modules/ModuleManager.h"
 
 namespace CameraCaptureUtils
 {
@@ -261,6 +264,37 @@ namespace CameraCaptureUtils
 		ImageTask->bOverwriteFile = true;
 
 		ImageWriteQueueModule->GetWriteQueue().Enqueue(MoveTemp(ImageTask));
+		return true;
+	}
+
+	bool WriteGrayPNG(const FString& FilePath, const void* Data, int64 NumBytes, int32 Width, int32 Height, int32 BitDepth)
+	{
+		const int64 Expected = static_cast<int64>(Width) * Height * (BitDepth / 8);
+		if (Width <= 0 || Height <= 0 || (BitDepth != 8 && BitDepth != 16) || !Data || NumBytes != Expected)
+		{
+			UE_LOG(LogTemp, Error, TEXT("WriteGrayPNG: %lld bytes does not match %dx%d at %d bits"), NumBytes, Width, Height, BitDepth);
+			return false;
+		}
+		// Loaded on the game thread at startup by the module; GetModuleChecked would load it here, off the game
+		// thread, which the module manager does not allow.
+		IImageWrapperModule* Module = FModuleManager::GetModulePtr<IImageWrapperModule>(FName(TEXT("ImageWrapper")));
+		if (!Module)
+		{
+			UE_LOG(LogTemp, Error, TEXT("WriteGrayPNG: ImageWrapper module is not loaded"));
+			return false;
+		}
+		TSharedPtr<IImageWrapper> Png = Module->CreateImageWrapper(EImageFormat::PNG);
+		if (!Png.IsValid() || !Png->SetRaw(Data, NumBytes, Width, Height, ERGBFormat::Gray, BitDepth))
+		{
+			UE_LOG(LogTemp, Error, TEXT("WriteGrayPNG: could not encode %s"), *FilePath);
+			return false;
+		}
+		const TArray64<uint8>& Compressed = Png->GetCompressed();
+		if (!FFileHelper::SaveArrayToFile(Compressed, *FilePath))
+		{
+			UE_LOG(LogTemp, Error, TEXT("WriteGrayPNG: could not write %s"), *FilePath);
+			return false;
+		}
 		return true;
 	}
 

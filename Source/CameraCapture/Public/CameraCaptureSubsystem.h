@@ -9,6 +9,7 @@
 #include "CameraCaptureSubsystem.generated.h"
 
 class UIntrinsicSceneCaptureComponent2D;
+struct FCameraCaptureSegTable;
 
 /**
  * Fired on the game thread after a frame has been harvested.
@@ -150,6 +151,19 @@ struct CAMERACAPTURE_API FCaptureData
 	UPROPERTY(BlueprintReadOnly, Category = "Capture Data")
 	int32 MotionHeight = 0;
 
+	/** Segmentation class mask: one fine class value (0-255, the custom-depth stencil) per pixel, row-major,
+	 *  on the COLOUR grid. Empty when segmentation was not captured. See UCameraCaptureSegmentationSubsystem
+	 *  for what the values mean. */
+	TArray<uint8> ClassData;
+
+	/** Class mask width; 0 when there is none. Equal to Width in practice. */
+	UPROPERTY(BlueprintReadOnly, Category = "Capture Data")
+	int32 ClassWidth = 0;
+
+	/** Class mask height; 0 when there is none. */
+	UPROPERTY(BlueprintReadOnly, Category = "Capture Data")
+	int32 ClassHeight = 0;
+
 	/** True when depth was captured at a different resolution than colour, so a
 	 *  consumer that needs them aligned has to resample one of them. */
 	bool HasMismatchedDepthResolution() const
@@ -290,10 +304,23 @@ public:
 	// ============================================================================
 
 	/** Register a camera component for centralized capture */
+	UFUNCTION(BlueprintCallable, Category = "Camera Capture")
 	void RegisterCamera(UIntrinsicSceneCaptureComponent2D* Camera);
 
 	/** Unregister a camera component */
+	UFUNCTION(BlueprintCallable, Category = "Camera Capture")
 	void UnregisterCamera(UIntrinsicSceneCaptureComponent2D* Camera);
+
+	/**
+	 * Put a camera in the world: a new actor holding one UIntrinsicSceneCaptureComponent2D at WorldTransform
+	 * with the given intrinsics, registered for capture unless bRegister is false.
+	 *
+	 * For scripted capture -- dataset sweeps over generated worlds, tests -- where there is no actor in the
+	 * level to put a camera on. Destroy the returned component's owner to remove it (unregistering is
+	 * automatic on the next capture).
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Camera Capture")
+	UIntrinsicSceneCaptureComponent2D* SpawnCamera(FName Name, const FTransform& WorldTransform, const FCameraIntrinsics& Intrinsics, bool bRegister = true);
 
 	/** Get number of registered cameras */
 	UFUNCTION(BlueprintPure, Category = "Camera Capture")
@@ -324,6 +351,15 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "Camera Capture")
 	UTextureRenderTarget2D* GetMotionRenderTarget(UIntrinsicSceneCaptureComponent2D* Camera) const;
+
+	/**
+	 * The segmentation pass's target for a camera, or null when that pass is not running.
+	 *
+	 * R is the fine class value as a float (0-255), G is 1 wherever the pass ran -- a viewer can use G to
+	 * tell "unlabelled" from "nothing rendered".
+	 */
+	UFUNCTION(BlueprintPure, Category = "Camera Capture")
+	UTextureRenderTarget2D* GetSegmentationRenderTarget(UIntrinsicSceneCaptureComponent2D* Camera) const;
 
 	// ============================================================================
 	// Capture Control
@@ -366,6 +402,7 @@ public:
 	FString GetOutputDirectory() const { return OutputDirectory; }
 
 	/** Set which channels to capture (RGB, Depth, Motion Vectors) */
+	UFUNCTION(BlueprintCallable, Category = "Camera Capture")
 	void SetCaptureChannels(bool bRGB, bool bDepth, bool bMotionVectors);
 
 	/**
@@ -385,6 +422,20 @@ public:
 	 *  depth are captured, so this is simply whether they were asked for. */
 	UFUNCTION(BlueprintPure, Category = "Camera Capture")
 	bool IsCapturingMotionVectors() const { return bCaptureMotionVectors; }
+
+	/**
+	 * Capture a segmentation class mask per camera, written as frame_N_class.png (fine) and
+	 * frame_N_class_coarse.png, with the class table beside the camera folders.
+	 *
+	 * Costs one more render per camera, lighting off. Turning it on also turns on the world's labelling
+	 * (UCameraCaptureSegmentationSubsystem): tagged primitives render custom depth with their class in the
+	 * stencil, and r.CustomDepth is raised to 3 if needed. Safe to change at any time.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Camera Capture")
+	void SetCaptureSegmentation(bool bEnable);
+
+	UFUNCTION(BlueprintPure, Category = "Camera Capture")
+	bool IsCapturingSegmentation() const { return bCaptureSegmentation; }
 
 	/** Set the depth+motion capture material (M_DmvCapture) */
 	UFUNCTION(BlueprintCallable, Category = "Camera Capture")
@@ -460,9 +511,14 @@ protected:
 
 	/** Write metadata JSON file — called from background thread.
 	 *  bCaptureDepth is needed because the file reports what was actually
-	 *  written, not what the geometry would allow. */
+	 *  written, not what the geometry would allow. SegTable, when given with a
+	 *  class mask, adds the classes visible in the frame and their pixel counts. */
 	static bool WriteMetadataFile_Static(const FString& FilePath, const FCaptureData& Data,
-		ERammsCaptureColorFormat Format = ERammsCaptureColorFormat::CombinedEXR, bool bCaptureDepth = true);
+		ERammsCaptureColorFormat Format = ERammsCaptureColorFormat::CombinedEXR, bool bCaptureDepth = true,
+		const FCameraCaptureSegTable* SegTable = nullptr);
+
+	/** Write the fine and coarse class masks — called from background thread. */
+	static bool WriteClassMasks_Static(const FString& FineClassPath, const FCaptureData& Data, const FCameraCaptureSegTable& SegTable);
 
 	/** Generate unique camera ID, handling collisions */
 	FCameraIdentifier GenerateCameraID(UIntrinsicSceneCaptureComponent2D* Camera);
@@ -595,6 +651,9 @@ protected:
 		/** The dedicated depth capture, in TonemappedColorPlusDepth. */
 		FPendingReadback DepthReadback;
 		bool			 bHasDepth = false;
+		/** The segmentation pass. */
+		FPendingReadback SegReadback;
+		bool			 bHasSeg = false;
 		int32			 FramesWaiting = 0; // Safety: drop after too many frames
 	};
 
@@ -655,6 +714,10 @@ protected:
 	/** Extract pixel data from a completed DMV readback into FCaptureData.
 	 *  RENDER THREAD ONLY; see HarvestRgbReadback. */
 	static void HarvestDmvReadback(FPendingReadback& Readback, FCaptureData& OutData);
+
+	/** Extract the class mask from a completed segmentation readback into FCaptureData.
+	 *  RENDER THREAD ONLY; see HarvestRgbReadback. */
+	static void HarvestSegReadback(FPendingReadback& Readback, FCaptureData& OutData);
 
 private:
 	/** Registered cameras (weak pointers to handle component destruction) */
@@ -730,6 +793,34 @@ private:
 	/** Create the SCS_SceneColorSceneDepth capture for a camera, used only by
 	 *  TonemappedColorPlusDepth. */
 	void SetupDepthCamera(UIntrinsicSceneCaptureComponent2D* RgbCamera);
+
+	/** Create the segmentation capture for a camera: the colour camera's view and grid, lighting off, with
+	 *  M_SegStencil writing the custom-depth stencil to R. */
+	void SetupSegCamera(UIntrinsicSceneCaptureComponent2D* RgbCamera);
+
+	/** Remove a camera's segmentation capture, if it has one. */
+	void DestroySegCamera(UIntrinsicSceneCaptureComponent2D* RgbCamera);
+
+	/** Turn the world's labelling on or off with the segmentation channel. */
+	void UpdateSegmentationLabeling();
+
+	/** Write the class table into the output directory if it changed since it was last written. Classes can
+	 *  appear mid-capture (a tag naming a class not in the settings), so this runs per serialized frame. */
+	void WriteClassTableIfChanged();
+
+	/** Whether to capture the segmentation class mask. */
+	bool bCaptureSegmentation = false;
+
+	/** Stencil-to-class material (M_SegStencil). */
+	UPROPERTY()
+	UMaterial* SegMaterialBase = nullptr;
+
+	TMap<TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D>, TWeakObjectPtr<USceneCaptureComponent2D>> SegCameras;
+	TMap<TWeakObjectPtr<UIntrinsicSceneCaptureComponent2D>, TWeakObjectPtr<UTextureRenderTarget2D>> SegRenderTargets;
+
+	/** The class table as last written, and where; rewritten when either changes. */
+	TSharedPtr<const FCameraCaptureSegTable> LastWrittenSegTable;
+	FString LastWrittenSegTableDir;
 
 	/** Last capture duration (for statistics) */
 	float LastCaptureDurationMs = 0.0f;

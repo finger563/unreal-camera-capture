@@ -35,6 +35,7 @@ public class CameraCapture : ModuleRules
 				"Projects",
 				"ImageWriteQueue", // needed for image writing
 				"ImageWrapper", // needed for image format support including EXR
+				"DeveloperSettings", // segmentation class settings
 				// ... add other public dependencies that you statically link with here ...
 			}
 			);
