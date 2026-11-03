@@ -227,7 +227,7 @@ enum class ERammsCaptureMode : uint8
 	 * CaptureMode is a persisted UPROPERTY. An asset saved before the split
 	 * therefore loads as the mode closest to what it asked for -- two renders,
 	 * tone-mapped colour -- whether it resolves by value or falls back to 0 after
-	 * failing to find the old name. Config/BaseCameraCapture.ini ships an
+	 * failing to find the old name. Config/DefaultCameraCapture.ini ships an
 	 * EnumRedirects entry so the name resolves explicitly rather than relying on
 	 * that fallback. CoreRedirects are read from the engine config hierarchy,
 	 * which a plugin's own config is not guaranteed to reach, so a consuming
